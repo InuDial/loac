@@ -19,7 +19,7 @@ jobs:
         uses: actions/checkout@v4
         with:
           fetch-depth: 0
-          ref: rewrite
+          ref: main
 
       - name: Install stable Rust
         uses: dtolnay/rust-toolchain@stable
@@ -70,7 +70,7 @@ jobs:
           echo "loac-macros $version did not reach crates.io" >&2
           exit 1
 
-      - name: Test the actor package archive
+      - name: Test the runtime package archive
         run: bash scripts/release-loac.sh verify-package loac
 
       - name: Create the immutable release tag

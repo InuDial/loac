@@ -76,8 +76,8 @@ release_tag() {
 }
 
 check_clean_checkout() {
-    [[ "$(git branch --show-current)" == "rewrite" ]] ||
-        die "release must run from the rewrite branch"
+    [[ "$(git branch --show-current)" == "main" ]] ||
+        die "release must run from the main branch"
     [[ -z "$(git status --porcelain)" ]] ||
         die "release checkout is not clean"
 }
@@ -96,7 +96,7 @@ check_tag_state() {
 check_release_link() {
     local tag
     tag=$(release_tag)
-    grep -Fq "blob/$tag/crates/actor/examples/README.md" crates/actor/src/lib.rs ||
+    grep -Fq "blob/$tag/crates/loac/examples/README.md" crates/loac/src/lib.rs ||
         die "crate docs must link the examples index through $tag"
 }
 
@@ -111,6 +111,7 @@ check_source() {
     cargo fmt --all -- --check
     RUSTC_WRAPPER= cargo test -p loac --locked
     RUSTC_WRAPPER= cargo test -p loac-macros --locked
+    RUSTC_WRAPPER= cargo test -p loac-macro-tests --locked
     cargo doc -p loac -p loac-macros --no-deps --locked
 }
 
@@ -129,16 +130,8 @@ verify_package() (
     tar -xzf "$archive" -C "$temp"
     package_dir="$temp/$package-$version"
     [[ -f "$package_dir/Cargo.toml" ]] || die "invalid package archive: $archive"
-    if [[ "$package" == "loac-macros" ]]; then
-        # Macro UI tests already ran from the source checkout. The macro is
-        # published before loac, so its archive must not require a new runtime
-        # dev dependency that is not in the registry yet.
-        CARGO_TARGET_DIR="$temp/target" RUSTC_WRAPPER= \
-            cargo test --manifest-path "$package_dir/Cargo.toml" --lib --locked
-    else
-        CARGO_TARGET_DIR="$temp/target" RUSTC_WRAPPER= \
-            cargo test --manifest-path "$package_dir/Cargo.toml" --locked
-    fi
+    CARGO_TARGET_DIR="$temp/target" RUSTC_WRAPPER= \
+        cargo test --manifest-path "$package_dir/Cargo.toml" --locked
 )
 
 crate_status() (

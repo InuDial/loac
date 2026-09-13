@@ -1,4 +1,4 @@
-# Rustfmt configuration for loong workspace
+# Rustfmt configuration for the LOAC workspace.
 edition = "2024"
 max_width = 100
 hard_tabs = false

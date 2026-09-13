@@ -9,25 +9,20 @@ They use one version. Publish the macro crate first.
 
 ## Prepare a release
 
-Work on a release commit that will land on `rewrite`.
+Work on a release commit that will land on `main`.
 
 1. Update `version` in both package manifests:
-   `crates/actor-macros/Cargo.toml` and `crates/actor/Cargo.toml`.
+   `crates/loac-macros/Cargo.toml` and `crates/loac/Cargo.toml`.
 2. Update the runtime's `loac-macros` requirement to that version.
    Keep its `path` entry for workspace development.
-3. Update the examples link in `crates/actor/src/lib.rs`.
+3. Update the examples link in `crates/loac/src/lib.rs`.
    It must use `loac-v<VERSION>`.
 4. Run `cargo check --workspace` to refresh `Cargo.lock`.
 5. Review the generated package metadata and commit the release.
 
-The workspace version is unrelated. Do not change it for this release.
-
-The macro crate's `actor-api` dev-dependency uses both `path` and `version`.
-Workspace tests use the local runtime through `path`; `cargo package` strips
-`path`, so published macro archives resolve the `version` from crates.io. Keep
-that version at the last published `loac` release — currently `0.2.0` — and do
-not advance it to the new actor version until that release is on crates.io.
-This lets macro archive tests run before the new actor release.
+Macro UI tests live in the private `loac-macro-tests` package.
+The macro package therefore has no circular runtime dev-dependency.
+This keeps its archive independently testable before publishing the runtime.
 
 Before pushing the release commit, run the local source check:
 
@@ -51,16 +46,15 @@ CARGO_REGISTRY_TOKEN=<crates.io API token>
 The token needs permission to publish both crates. Keep it in the environment.
 Do not put it in the repository or workflow file.
 
-GitHub exposes manual dispatch only when the workflow exists on the default
-branch. Keep the workflow there, normally after review merges it to `dev`.
-The job itself checks out `rewrite`, so push the release commit there first.
-That checkout must be clean. The workflow also needs permission to push tags.
+GitHub exposes manual dispatch only from the default branch.
+Keep the workflow and release commit on `main`.
+That checkout must be clean.
+The workflow also needs permission to push tags.
 
 ## Run the release
 
 Open **Actions**, select **Release loac**, and choose **Run workflow**.
-Run it from the branch containing the workflow, normally `dev`.
-The job then checks out `rewrite` and performs these steps:
+The job checks out `main` and performs these steps:
 
 1. Run formatting, tests, and documentation checks.
 2. Package and test `loac-macros` from its archive.
