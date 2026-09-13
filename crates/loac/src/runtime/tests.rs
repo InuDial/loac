@@ -88,12 +88,15 @@ impl Actor for UnboundedTestActor {
     }
 }
 
-fn scope_state<A: Actor>(inner: &Arc<ActorInner<A>>) -> ScopeState<A> {
+fn scope_state<A: Actor>(_inner: &Arc<ActorInner<A>>) -> ScopeState<A> {
     let options = <A as ActorConfig>::Options::default();
     ScopeState {
-        actor_ref: ActorRef::new(Arc::clone(inner)),
         children: A::open_children(&options),
     }
+}
+
+fn actor_ref<A: Actor>(inner: &Arc<ActorInner<A>>) -> ActorRef<A> {
+    ActorRef::new(Arc::clone(inner))
 }
 
 struct CascadingPanicPayload(Arc<AtomicBool>);

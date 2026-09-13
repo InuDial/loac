@@ -9,8 +9,8 @@ use std::{
 };
 
 use crate::{
-    Actor, ActorConfig, ActorScope, ChildExit, ChildId, ExitReason, ExitStatus, HasMailbox,
-    IntoActorFuture, Shutdown, SubtreeStatus,
+    Actor, ActorConfig, ActorRef, ActorScope, ChildExit, ChildId, ExitReason, ExitStatus,
+    HasMailbox, IntoActorFuture, Shutdown, SubtreeStatus,
     mailbox::{ActorInbox, ActorInner, Control, Envelope, Mode},
     owned::OwnedTasks,
     scheduling::{
@@ -22,11 +22,14 @@ use crate::{
 };
 
 use super::super::{ScopeState, actor_turn};
-use super::{CountEnvelope, TestActor, enqueue_test_envelope, scope_state, test_actor_inner};
+use super::{
+    CountEnvelope, TestActor, actor_ref, enqueue_test_envelope, scope_state, test_actor_inner,
+};
 
 /// Owns all inputs for focused actor-turn tests.
 struct ActorTurnFixture<A: Actor> {
     actor: A,
+    actor_ref: ActorRef<A>,
     state: ScopeState<A>,
     inbox: ActorInbox<A>,
     inner: Arc<ActorInner<A>>,
@@ -42,9 +45,11 @@ impl<A: Actor> ActorTurnFixture<A> {
         scheduler: ActorScheduler<A>,
     ) -> Self {
         let state = scope_state(&inner);
+        let actor_ref = actor_ref(&inner);
         let owned = OwnedTasks::new(Arc::clone(&inner));
         Self {
             actor,
+            actor_ref,
             state,
             inbox,
             inner,
@@ -56,6 +61,7 @@ impl<A: Actor> ActorTurnFixture<A> {
     async fn next(&mut self, expected_mode: Mode) -> SchedulerTurn {
         actor_turn(
             &mut self.actor,
+            &self.actor_ref,
             &mut self.state,
             &mut self.inbox,
             &self.inner,
@@ -71,6 +77,7 @@ impl<A: Actor> ActorTurnFixture<A> {
     fn poll_once(&mut self, expected_mode: Mode, task: &mut Context<'_>) -> Poll<SchedulerTurn> {
         let turn = actor_turn(
             &mut self.actor,
+            &self.actor_ref,
             &mut self.state,
             &mut self.inbox,
             &self.inner,

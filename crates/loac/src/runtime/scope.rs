@@ -3,8 +3,9 @@ use crate::access::Cx;
 
 // Runtime ownership stays private.
 // Public scope views expose only phase-valid capabilities.
+// Actor identity lives separately from mutable scope state.
+// Pending `Cx` futures may retain shared identity borrows.
 pub(crate) struct ScopeState<A: Actor> {
-    pub(crate) actor_ref: ActorRef<A>,
     pub(crate) children: <A as SupervisionConfig>::Children,
 }
 
@@ -15,8 +16,11 @@ impl<A: Actor> ScopeState<A> {
     }
 
     /// Lends the capabilities valid before child cleanup.
-    pub(crate) fn actor_scope(&mut self) -> ActorScope<'_, A> {
-        ActorScope { state: self }
+    pub(crate) fn actor_scope<'a>(&'a mut self, actor_ref: &'a ActorRef<A>) -> ActorScope<'a, A> {
+        ActorScope {
+            actor_ref,
+            state: self,
+        }
     }
 
     /// Polls exits without exposing child storage to schedulers.
@@ -26,10 +30,8 @@ impl<A: Actor> ScopeState<A> {
 
     /// Lends the restricted cleanup capabilities.
     /// The exclusive borrow avoids requiring child state to be `Sync`.
-    pub(crate) fn stop_scope(&mut self) -> StopScope<'_, A> {
-        StopScope {
-            actor_ref: &self.actor_ref,
-        }
+    pub(crate) fn stop_scope<'a>(&'a mut self, actor_ref: &'a ActorRef<A>) -> StopScope<'a, A> {
+        StopScope { actor_ref }
     }
 }
 
@@ -92,6 +94,7 @@ impl<A: Actor> fmt::Debug for StopScope<'_, A> {
 /// Actor futures receive a fresh view for each poll.
 /// Initialization and lifecycle hooks may retain it across `await`.
 pub struct ActorScope<'a, A: Actor> {
+    pub(crate) actor_ref: &'a ActorRef<A>,
     pub(crate) state: &'a mut ScopeState<A>,
 }
 
@@ -113,7 +116,7 @@ impl<A: Actor> ActorScope<'_, A> {
     /// [`TryCallErrorKind::Closed`](crate::TryCallErrorKind::Closed) instead.
     #[must_use]
     pub const fn myself(&self) -> &ActorRef<A> {
-        &self.state.actor_ref
+        self.actor_ref
     }
 
     /// Requests shutdown of this actor and, eventually, its subtree.
@@ -128,7 +131,7 @@ impl<A: Actor> ActorScope<'_, A> {
     /// commits first determines the caller's result.
     #[must_use]
     pub fn request_shutdown(&self, shutdown: Shutdown) -> ShutdownStatus {
-        self.state.actor_ref.request_shutdown(shutdown)
+        self.actor_ref.request_shutdown(shutdown)
     }
 
     /// Builds an interleaved plain-Future reply that may access actor and
@@ -152,12 +155,11 @@ impl<A: Actor> ActorScope<'_, A> {
         )
             -> std::pin::Pin<Box<dyn std::future::Future<Output = R> + Send + 'a>>,
     {
-        let cx = Cx::new(actor, self.state);
+        let cx = Cx::new(actor, self);
         let future = f(cx);
-        // SAFETY: the future's `'_` lifetime comes only from the `Cx` handle,
-        // whose lifetime is a phantom over raw actor/scope pointers. The reply
-        // is polled only on the actor task and is dropped before the actor or
-        // scope state is torn down.
+        // SAFETY: `Cx` carries shared address and phantom mutable access.
+        // The runtime polls this reply only on its actor task.
+        // It drops the reply before actor, address, or scope teardown.
         let future: std::pin::Pin<Box<dyn std::future::Future<Output = R> + Send + 'static>> =
             unsafe { std::mem::transmute(future) };
         crate::reply::CxReply {
@@ -182,12 +184,11 @@ impl<A: Actor> ActorScope<'_, A> {
         )
             -> std::pin::Pin<Box<dyn std::future::Future<Output = R> + Send + 'a>>,
     {
-        let cx = Cx::new(actor, self.state);
+        let cx = Cx::new(actor, self);
         let future = f(cx);
-        // SAFETY: the future's `'_` lifetime comes only from the `Cx` handle,
-        // whose lifetime is a phantom over raw actor/scope pointers. The reply
-        // is polled only on the actor task and is dropped before the actor or
-        // scope state is torn down.
+        // SAFETY: `Cx` carries shared address and phantom mutable access.
+        // The runtime polls this reply only on its actor task.
+        // It drops the reply before actor, address, or scope teardown.
         let future: std::pin::Pin<Box<dyn std::future::Future<Output = R> + Send + 'static>> =
             unsafe { std::mem::transmute(future) };
         crate::reply::CxStream {
@@ -218,12 +219,11 @@ impl<A: Actor> ActorScope<'_, A> {
         )
             -> std::pin::Pin<Box<dyn std::future::Future<Output = R> + Send + 'a>>,
     {
-        let cx = Cx::new(actor, self.state);
+        let cx = Cx::new(actor, self);
         let future = f(cx);
-        // SAFETY: the future's `'_` lifetime comes only from the `Cx` handle,
-        // whose lifetime is a phantom over raw actor/scope pointers. The reply
-        // is polled only on the actor task and is dropped before the actor or
-        // scope state is torn down.
+        // SAFETY: `Cx` carries shared address and phantom mutable access.
+        // The runtime polls this reply only on its actor task.
+        // It drops the reply before actor, address, or scope teardown.
         let future: std::pin::Pin<Box<dyn std::future::Future<Output = R> + Send + 'static>> =
             unsafe { std::mem::transmute(future) };
         crate::reply::CxExclusive {
@@ -252,12 +252,11 @@ impl<A: Actor> ActorScope<'_, A> {
         )
             -> std::pin::Pin<Box<dyn std::future::Future<Output = R> + Send + 'a>>,
     {
-        let cx = Cx::new(actor, self.state);
+        let cx = Cx::new(actor, self);
         let future = f(cx);
-        // SAFETY: the future's `'_` lifetime comes only from the `Cx` handle,
-        // whose lifetime is a phantom over raw actor/scope pointers. The reply
-        // is polled only on the actor task and is dropped before the actor or
-        // scope state is torn down.
+        // SAFETY: `Cx` carries shared address and phantom mutable access.
+        // The runtime polls this reply only on its actor task.
+        // It drops the reply before actor, address, or scope teardown.
         let future: std::pin::Pin<Box<dyn std::future::Future<Output = R> + Send + 'static>> =
             unsafe { std::mem::transmute(future) };
         crate::reply::CxStreamExclusive {
@@ -271,7 +270,7 @@ impl<A: Actor> Deref for ActorScope<'_, A> {
     type Target = ActorRef<A>;
 
     fn deref(&self) -> &Self::Target {
-        &self.state.actor_ref
+        self.actor_ref
     }
 }
 

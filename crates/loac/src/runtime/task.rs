@@ -47,11 +47,8 @@ impl<A: Actor> Unstarted<A> {
             children,
         } = self;
 
-        let state = ScopeState {
-            actor_ref: actor_ref.clone(),
-            children,
-        };
-        let future = Box::pin(run_actor(args, state, inbox, scheduler));
+        let state = ScopeState { children };
+        let future = Box::pin(run_actor(args, actor_ref.clone(), state, inbox, scheduler));
 
         PreparedActor { actor_ref, future }
     }

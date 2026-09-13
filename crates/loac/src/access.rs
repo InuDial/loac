@@ -17,22 +17,24 @@ use crate::{Actor, ActorRef, ActorScope, runtime::ScopeState};
 /// [`ActorScope::cx_exclusive`] / [`ActorScope::cx_stream_exclusive`]
 /// exclusive constructors.
 ///
-/// The handle carries a phantom lifetime so safe code cannot store it in a
-/// `'static` location (thread locals, detached tasks, globals). It is `Send`
-/// because the runtime only polls the owning future on the actor task; the raw
-/// pointers are never dereferenced concurrently. For address-only access, `Cx`
-/// derefs to [`ActorRef`] and exposes [`myself`](Self::myself).
+/// The handle carries a shared address borrow and phantom mutable lifetimes.
+/// Safe code cannot store it in a `'static` location. It is `Send` because the
+/// runtime polls its future only on the actor task. The raw pointers are never
+/// dereferenced concurrently. For address-only access, `Cx` derefs to
+/// [`ActorRef`] and exposes [`myself`](Self::myself).
 pub struct Cx<'a, A: Actor + 'a> {
     actor: NonNull<A>,
-    scope: NonNull<ScopeState<A>>,
-    _lifetime: PhantomData<&'a mut A>,
+    state: NonNull<ScopeState<A>>,
+    actor_ref: &'a ActorRef<A>,
+    _lifetime: PhantomData<(&'a mut A, &'a mut ScopeState<A>)>,
 }
 
 impl<A: Actor> Cx<'_, A> {
-    pub(crate) fn new<'a>(actor: &'a mut A, scope: &'a mut ScopeState<A>) -> Cx<'a, A> {
+    pub(crate) fn new<'a>(actor: &'a mut A, scope: &'a mut ActorScope<'_, A>) -> Cx<'a, A> {
         Cx {
             actor: NonNull::from(actor),
-            scope: NonNull::from(scope),
+            state: NonNull::from(&mut *scope.state),
+            actor_ref: scope.actor_ref,
             _lifetime: PhantomData,
         }
     }
@@ -52,8 +54,8 @@ impl<A: Actor> Cx<'_, A> {
         // non-overlapping mutable borrows (`&mut A` and `&mut ScopeState<A>`),
         // so reconstructing them together preserves uniqueness.
         let actor = unsafe { self.actor.as_mut() };
-        let state = unsafe { self.scope.as_mut() };
-        let mut scope = state.actor_scope();
+        let state = unsafe { self.state.as_mut() };
+        let mut scope = state.actor_scope(self.actor_ref);
         f(actor, &mut scope)
     }
 
@@ -65,13 +67,7 @@ impl<A: Actor> Cx<'_, A> {
     /// `with`.
     #[must_use]
     pub fn myself(&self) -> &ActorRef<A> {
-        // SAFETY: `scope` points to the actor task's scope state, which the
-        // runtime keeps alive for as long as this `Cx` exists. The address
-        // field is immutable and `ActorRef` is a thread-safe handle, so a
-        // shared borrow of it cannot race with the exclusive actor borrows
-        // created by `with`.
-        let state = unsafe { self.scope.as_ref() };
-        &state.actor_ref
+        self.actor_ref
     }
 }
 
@@ -85,7 +81,7 @@ impl<A: Actor> Deref for Cx<'_, A> {
 
 // SAFETY: the runtime polls the owning future on the actor task. Actor and
 // scope mutations happen inside `with` while the actor task has exclusive
-// access; `myself` only reads the immutable address field. The phantom
-// lifetime does not correspond to an actual borrow that could race with
+// access; `myself` returns a separate shared actor-address borrow. The phantom
+// mutable lifetimes do not correspond to actual borrows that could race with
 // another thread.
 unsafe impl<A: Actor> Send for Cx<'_, A> {}

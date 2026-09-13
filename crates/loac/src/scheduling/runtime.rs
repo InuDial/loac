@@ -9,7 +9,7 @@ use std::{
 };
 
 use crate::{
-    Actor, ChildExit,
+    Actor, ActorRef, ChildExit,
     mailbox::{ActorInbox, ActorInner, Control, Mode},
     owned::OwnedTasks,
     runtime::ScopeState,
@@ -41,6 +41,7 @@ pub(crate) enum SchedulerTurn {
 /// Borrows actor-task resources for one scheduler poll.
 pub(crate) struct TurnContext<'a, A: Actor> {
     pub(crate) actor: &'a mut A,
+    pub(crate) actor_ref: &'a ActorRef<A>,
     pub(crate) state: &'a mut ScopeState<A>,
     pub(crate) inbox: &'a mut ActorInbox<A>,
     pub(crate) inner: &'a Arc<ActorInner<A>>,
@@ -214,7 +215,7 @@ where
             }
             let selected = match lane {
                 SerialLane::Mailbox if turn.receive_messages => {
-                    let mut scope = turn.state.actor_scope();
+                    let mut scope = turn.state.actor_scope(turn.actor_ref);
                     let mut dispatched = 0;
                     loop {
                         match turn.inbox.poll_recv(task) {
@@ -319,7 +320,7 @@ where
                 InterleavedLane::Mailbox
                     if turn.receive_messages && scheduler.state().has_dispatch_capacity() =>
                 {
-                    let mut scope = turn.state.actor_scope();
+                    let mut scope = turn.state.actor_scope(turn.actor_ref);
                     let mut dispatched = 0;
                     loop {
                         match turn.inbox.poll_recv(task) {
@@ -352,7 +353,7 @@ where
                     }
                 }
                 InterleavedLane::Interleaved if scheduler.state().has_interleaved() => {
-                    let mut scope = turn.state.actor_scope();
+                    let mut scope = turn.state.actor_scope(turn.actor_ref);
                     match scheduler.state().queue.poll(
                         turn.actor,
                         &mut scope,
@@ -399,7 +400,7 @@ fn poll_exclusive_turn<A: Actor>(
     turn: &mut TurnContext<'_, A>,
     task: &mut Context<'_>,
 ) -> Poll<SchedulerTurn> {
-    let mut scope = turn.state.actor_scope();
+    let mut scope = turn.state.actor_scope(turn.actor_ref);
     let ready = exclusive
         .poll(
             turn.actor,

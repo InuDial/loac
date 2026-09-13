@@ -381,15 +381,13 @@ where
             None => DispatchReply::one_way(permit),
         };
 
-        let cx = Cx::new(actor, scope.state);
+        let cx = Cx::new(actor, scope);
         let out = StreamOut::new(out);
         let future = Box::pin(<A as StreamHandler<M>>::handle(message, out, cx))
             as Pin<Box<dyn Future<Output = M::Final> + Send + '_>>;
-        // SAFETY: the future's `'_` lifetime comes only from the `Cx` handle
-        // and the `StreamOut` wrapper, both of which carry phantom lifetimes
-        // over raw actor/scope pointers and the owned item writer. The reply is
-        // polled only on the actor task and is dropped before the actor or
-        // scope state is torn down.
+        // SAFETY: the lifetime covers `Cx` access and `StreamOut` ownership.
+        // The runtime polls this reply only on its actor task.
+        // It drops the reply before actor, address, or scope teardown.
         let future: Pin<Box<dyn Future<Output = M::Final> + Send + 'static>> =
             unsafe { std::mem::transmute(future) };
         let strategy = crate::reply::CxStream {

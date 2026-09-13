@@ -15,9 +15,10 @@ async fn unadmitted_mailbox_permit_does_not_extend_drain() {
     let options = <TestActor as ActorConfig>::Options::default()
         .with_max_in_flight(NonZeroUsize::new(1).unwrap());
     let (_, _, scheduler) = TestActor::open(&options);
+    let actor_ref = actor_ref(&inner);
     let status = tokio::time::timeout(
         Duration::from_secs(1),
-        run_actor::<TestActor>((), scope, inbox, scheduler),
+        run_actor::<TestActor>((), actor_ref, scope, inbox, scheduler),
     )
     .await
     .expect("an unadmitted capacity permit must not hold Drain open");
@@ -42,11 +43,13 @@ async fn committed_kill_prevents_a_graceful_child_request() {
     let child_ref = ActorRef::new(Arc::clone(&child));
     scope.children.insert_ref(&child_ref);
     let mut actor = TestActor;
+    let actor_ref = actor_ref(&inner);
 
     assert_eq!(control.request(Shutdown::Kill), ShutdownStatus::Requested);
     assert!(matches!(
         graceful_finish(
             &mut actor,
+            &actor_ref,
             &mut scope,
             control,
             Shutdown::Stop,
@@ -86,6 +89,7 @@ fn truncated_reply_sweep_yields_before_ready_mailbox() {
         );
     }
     let mut actor = TestActor;
+    let actor_ref = actor_ref(&inner);
     // Start at replies. The old path continued to the ready mailbox.
     scheduler.state().cursor = InterleavedLane::Interleaved;
     let mut task = Context::from_waker(Waker::noop());
@@ -93,6 +97,7 @@ fn truncated_reply_sweep_yields_before_ready_mailbox() {
     {
         let mut turn = std::pin::pin!(actor_turn(
             &mut actor,
+            &actor_ref,
             &mut scope,
             &mut inbox,
             &inner,
@@ -132,10 +137,12 @@ async fn drain_priority_precedes_owned_completion() {
         <TestActor as ActorConfig>::Options::default().with_max_in_flight(NonZeroUsize::MIN);
     let (_, _, mut scheduler) = TestActor::open(&options);
     let mut actor = TestActor;
+    let actor_ref = actor_ref(&inner);
 
     assert!(matches!(
         drain_turn(
             &mut actor,
+            &actor_ref,
             &mut scope,
             &mut inbox,
             &inner,
@@ -149,6 +156,7 @@ async fn drain_priority_precedes_owned_completion() {
 
     let turn = drain_turn(
         &mut actor,
+        &actor_ref,
         &mut scope,
         &mut inbox,
         &inner,
@@ -165,6 +173,7 @@ async fn drain_priority_precedes_owned_completion() {
     assert!(matches!(
         drain_turn(
             &mut actor,
+            &actor_ref,
             &mut scope,
             &mut inbox,
             &inner,
@@ -213,7 +222,14 @@ async fn child_kill_commits_before_actor_work_is_dropped() {
     });
 
     assert_eq!(
-        kill_actor(&mut scope, &mut inbox, &owned, &mut scheduler).await,
+        kill_actor(
+            &mut scope,
+            &mut inbox,
+            &inner.control,
+            &owned,
+            &mut scheduler,
+        )
+        .await,
         ExitStatus::new(ExitReason::Killed, SubtreeStatus::Terminated)
     );
     assert!(active_observed_kill.load(Ordering::SeqCst));

@@ -65,8 +65,15 @@ async fn aborted_descendant_only_weakens_parent_subtree_status() {
         let options =
             <TestActor as ActorConfig>::Options::default().with_max_in_flight(NonZeroUsize::MIN);
         let (_, _, scheduler) = TestActor::open(&options);
+        let actor_ref = actor_ref(&inner);
         let task = ActorTask::new(
-            Box::pin(run_actor::<TestActor>((), scope, inbox, scheduler)),
+            Box::pin(run_actor::<TestActor>(
+                (),
+                actor_ref,
+                scope,
+                inbox,
+                scheduler,
+            )),
             ExitGuard::new(Arc::clone(&inner), None),
         );
         let status = tokio::time::timeout(Duration::from_secs(1), task)
@@ -99,8 +106,9 @@ async fn dequeued_child_exit_keeps_registration_until_handled() {
     assert_eq!(state.children.len(), 1);
 
     let mut actor = CountChildExit(Arc::clone(&observed));
+    let actor_ref = actor_ref(&inner);
     assert!(matches!(
-        handle_child_exit(&mut actor, &mut state, event, control).await,
+        handle_child_exit(&mut actor, &actor_ref, &mut state, event, control).await,
         Work::Complete(())
     ));
     assert_eq!(state.children.len(), 0);
@@ -129,10 +137,12 @@ async fn graceful_cutoff_absorbs_a_dequeued_child_exit() {
         let child_ref = ActorRef::new(Arc::clone(&child));
         let child_id = scope.children.insert_ref(&child_ref);
         let mut actor = CountChildExit(Arc::clone(&observed));
+        let actor_ref = actor_ref(&inner);
         assert_eq!(control.request(shutdown), ShutdownStatus::Requested);
         assert!(matches!(
             handle_child_exit(
                 &mut actor,
+                &actor_ref,
                 &mut scope,
                 ChildExit::new(
                     child_id,
@@ -175,11 +185,13 @@ async fn admitted_child_exit_hook_finishes_across_graceful_cutoff() {
             completed: Some(completed_tx),
         };
         let controller = ActorRef::new(Arc::clone(&inner));
+        let actor_ref = actor_ref(&inner);
 
         let (work, ()) = tokio::time::timeout(Duration::from_secs(1), async {
             tokio::join!(
                 handle_child_exit(
                     &mut actor,
+                    &actor_ref,
                     &mut scope,
                     ChildExit::new(
                         child_id,
