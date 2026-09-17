@@ -9,11 +9,9 @@ use std::{
 };
 
 use crate::{
-    Actor, ActorConfig, ActorFuture, ActorScope, IntoActorFuture, MessageConfig,
+    Actor, ActorConfig, ActorScope, MessageConfig,
     mailbox::{ActorInner, Mode},
-    scheduling::{
-        Exclusive, Fixed, InterleavedProfile, InterleavedScheduler, ReplyScheduler, Seal, Serial,
-    },
+    scheduling::{Fixed, InterleavedProfile, InterleavedScheduler, ScheduledFuture, Seal, Serial},
 };
 
 use super::RuntimeScheduler;
@@ -85,9 +83,9 @@ fn fixed_limit_stops_dispatch_at_capacity() {
     let (_, _, mut scheduler) = FixedActor::open(&options);
 
     assert!(scheduler.state().has_dispatch_capacity());
-    scheduler.__push_interleaved(Seal, std::future::pending::<()>().into_actor());
+    scheduler.__push_interleaved(Seal, ScheduledFuture::test(std::future::pending::<()>()));
     assert!(scheduler.state().has_dispatch_capacity());
-    scheduler.__push_interleaved(Seal, std::future::pending::<()>().into_actor());
+    scheduler.__push_interleaved(Seal, ScheduledFuture::test(std::future::pending::<()>()));
     assert!(!scheduler.state().has_dispatch_capacity());
 }
 
@@ -96,14 +94,14 @@ fn dynamic_limit_uses_each_spawn_option() {
     let options = <DynamicActor as ActorConfig>::Options::default();
     let (_, _, mut scheduler) = DynamicActor::open(&options);
     for _ in 0..2 {
-        scheduler.__push_interleaved(Seal, std::future::pending::<()>().into_actor());
+        scheduler.__push_interleaved(Seal, ScheduledFuture::test(std::future::pending::<()>()));
     }
     assert!(!scheduler.state().has_dispatch_capacity());
 
     let options = options.with_max_in_flight(std::num::NonZeroUsize::new(3).unwrap());
     let (_, _, mut scheduler) = DynamicActor::open(&options);
     for _ in 0..2 {
-        scheduler.__push_interleaved(Seal, std::future::pending::<()>().into_actor());
+        scheduler.__push_interleaved(Seal, ScheduledFuture::test(std::future::pending::<()>()));
     }
     assert!(scheduler.state().has_dispatch_capacity());
 }
@@ -115,7 +113,7 @@ fn unbounded_profile_never_closes_capacity() {
 
     for _ in 0..128 {
         assert!(scheduler.state().has_dispatch_capacity());
-        scheduler.__push_interleaved(Seal, std::future::pending::<()>().into_actor());
+        scheduler.__push_interleaved(Seal, ScheduledFuture::test(std::future::pending::<()>()));
     }
     assert!(scheduler.state().has_dispatch_capacity());
 }
@@ -126,15 +124,10 @@ struct DropProbe {
     panic: bool,
 }
 
-impl ActorFuture<DynamicActor> for DropProbe {
+impl Future for DropProbe {
     type Output = ();
 
-    fn poll(
-        self: Pin<&mut Self>,
-        _: &mut DynamicActor,
-        _: &mut ActorScope<'_, DynamicActor>,
-        _: &mut Context<'_>,
-    ) -> Poll<()> {
+    fn poll(self: Pin<&mut Self>, _: &mut Context<'_>) -> Poll<()> {
         Poll::Pending
     }
 }
@@ -167,19 +160,19 @@ fn clear_contains_each_reply_drop() {
 
     scheduler.__push_interleaved(
         Seal,
-        DropProbe {
+        ScheduledFuture::test(DropProbe {
             dropped: Arc::clone(&interleaved_dropped),
             dropped_while_unwinding: Arc::clone(&dropped_while_unwinding),
             panic: false,
-        },
+        }),
     );
-    scheduler.__push_exclusive(
+    scheduler.__push_interleaved(
         Seal,
-        DropProbe {
+        ScheduledFuture::test(DropProbe {
             dropped: Arc::clone(&exclusive_dropped),
             dropped_while_unwinding: Arc::clone(&dropped_while_unwinding),
             panic: true,
-        },
+        }),
     );
     RuntimeScheduler::clear(&mut scheduler, &actor.control);
 
@@ -204,11 +197,11 @@ fn queue_clear_continues_after_one_drop_panics() {
     ] {
         scheduler.__push_interleaved(
             Seal,
-            DropProbe {
+            ScheduledFuture::test(DropProbe {
                 dropped,
                 dropped_while_unwinding: Arc::clone(&dropped_while_unwinding),
                 panic,
-            },
+            }),
         );
     }
     RuntimeScheduler::clear(&mut scheduler, &actor.control);
@@ -218,21 +211,4 @@ fn queue_clear_continues_after_one_drop_panics() {
     assert!(!dropped_while_unwinding.load(Ordering::SeqCst));
     assert!(RuntimeScheduler::is_idle(&mut scheduler));
     assert_eq!(actor.control.mode(), Mode::Failing);
-}
-
-#[test]
-fn exclusive_drop_contains_its_future_panic() {
-    let dropped = Arc::new(AtomicBool::new(false));
-    let dropped_while_unwinding = Arc::new(AtomicBool::new(false));
-    let mut exclusive = Exclusive::<DynamicActor>::new();
-    exclusive.push(DropProbe {
-        dropped: Arc::clone(&dropped),
-        dropped_while_unwinding: Arc::clone(&dropped_while_unwinding),
-        panic: true,
-    });
-
-    drop(exclusive);
-
-    assert!(dropped.load(Ordering::SeqCst));
-    assert!(!dropped_while_unwinding.load(Ordering::SeqCst));
 }

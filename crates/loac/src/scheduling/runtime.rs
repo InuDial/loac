@@ -9,15 +9,15 @@ use std::{
 };
 
 use crate::{
-    Actor, ActorRef, ChildExit,
+    Actor, ChildExit,
     mailbox::{ActorInbox, ActorInner, Control, Mode},
     owned::OwnedTasks,
-    runtime::ScopeState,
+    runtime::ActorAccess,
     transport::{MessageConfig, MessageInbox, MessageSender, NoInbox, NoSender},
 };
 
 use super::{
-    Disabled, Exclusive, InterleavedLane, InterleavedProfile, SchedulerProfile, Serial, SerialLane,
+    Disabled, InterleavedLane, InterleavedProfile, SchedulerProfile, Serial, SerialLane,
     queue::InterleavedPoll,
 };
 
@@ -40,9 +40,7 @@ pub(crate) enum SchedulerTurn {
 
 /// Borrows actor-task resources for one scheduler poll.
 pub(crate) struct TurnContext<'a, A: Actor> {
-    pub(crate) actor: &'a mut A,
-    pub(crate) actor_ref: &'a ActorRef<A>,
-    pub(crate) state: &'a mut ScopeState<A>,
+    pub(crate) access: &'a mut ActorAccess<A>,
     pub(crate) inbox: &'a mut ActorInbox<A>,
     pub(crate) inner: &'a Arc<ActorInner<A>>,
     pub(crate) owned: &'a OwnedTasks<A>,
@@ -55,8 +53,6 @@ pub(crate) trait RuntimeScheduler<A: Actor>: Send + 'static {
 
     fn poll_actor_replies(
         &mut self,
-        actor: &mut A,
-        scope: &mut crate::ActorScope<'_, A>,
         control: &Control,
         expected_mode: Mode,
         task: &mut Context<'_>,
@@ -76,8 +72,6 @@ pub trait SchedulerStrategy<A: Actor, P: Send + 'static>: Send + 'static {
 
     fn poll_actor_replies(
         scheduler: &mut P,
-        actor: &mut A,
-        scope: &mut crate::ActorScope<'_, A>,
         control: &Control,
         expected_mode: Mode,
         task: &mut Context<'_>,
@@ -108,13 +102,11 @@ where
 
     fn poll_actor_replies(
         &mut self,
-        actor: &mut A,
-        scope: &mut crate::ActorScope<'_, A>,
         control: &Control,
         expected_mode: Mode,
         task: &mut Context<'_>,
     ) -> Poll<()> {
-        P::Strategy::poll_actor_replies(self, actor, scope, control, expected_mode, task)
+        P::Strategy::poll_actor_replies(self, control, expected_mode, task)
     }
 
     fn poll_turn(
@@ -142,8 +134,6 @@ where
 
     fn poll_actor_replies(
         _scheduler: &mut Disabled,
-        _actor: &mut A,
-        _scope: &mut crate::ActorScope<'_, A>,
         _control: &Control,
         _expected_mode: Mode,
         _task: &mut Context<'_>,
@@ -160,7 +150,7 @@ where
             return Poll::Ready(SchedulerTurn::LifecycleHint);
         }
 
-        match poll_child(turn.state, task) {
+        match poll_child(turn.access, task) {
             Some(turn) => Poll::Ready(turn),
             None => Poll::Pending,
         }
@@ -178,20 +168,18 @@ where
     A::Inbox: MessageInbox<A>,
 {
     fn is_idle(scheduler: &mut Serial<A>) -> bool {
-        scheduler.exclusive.is_empty()
+        let _ = scheduler;
+        true
     }
 
     fn poll_actor_replies(
         scheduler: &mut Serial<A>,
-        actor: &mut A,
-        scope: &mut crate::ActorScope<'_, A>,
-        control: &Control,
-        expected_mode: Mode,
-        task: &mut Context<'_>,
+        _control: &Control,
+        _expected_mode: Mode,
+        _task: &mut Context<'_>,
     ) -> Poll<()> {
-        scheduler
-            .exclusive
-            .poll(actor, scope, control, expected_mode, task)
+        let _ = scheduler;
+        Poll::Pending
     }
 
     fn poll_turn(
@@ -203,10 +191,6 @@ where
             return Poll::Ready(SchedulerTurn::LifecycleHint);
         }
 
-        if !scheduler.exclusive.is_empty() {
-            return poll_exclusive_turn(&mut scheduler.exclusive, turn, task);
-        }
-
         let start = scheduler.cursor;
         let mut lane = start;
         loop {
@@ -215,14 +199,13 @@ where
             }
             let selected = match lane {
                 SerialLane::Mailbox if turn.receive_messages => {
-                    let mut scope = turn.state.actor_scope(turn.actor_ref);
                     let mut dispatched = 0;
                     loop {
                         match turn.inbox.poll_recv(task) {
                             Poll::Ready(Some(envelope)) => {
-                                envelope.dispatch(
-                                    turn.actor, &mut scope, turn.owned, scheduler, turn.inner,
-                                );
+                                let (actor, mut scope) = turn.access.parts();
+                                envelope
+                                    .dispatch(actor, &mut scope, turn.owned, scheduler, turn.inner);
                                 dispatched += 1;
                             }
                             Poll::Ready(None) => break Some(SchedulerTurn::InboxClosed),
@@ -233,14 +216,12 @@ where
                             scheduler.cursor = lane.next();
                             return Poll::Ready(SchedulerTurn::LifecycleHint);
                         }
-                        if dispatched == A::MAILBOX_DISPATCH_BUDGET.get()
-                            || !scheduler.exclusive.is_empty()
-                        {
+                        if dispatched == A::MAILBOX_DISPATCH_BUDGET.get() {
                             break Some(SchedulerTurn::Progress);
                         }
                     }
                 }
-                SerialLane::ChildExit => poll_child(turn.state, task),
+                SerialLane::ChildExit => poll_child(turn.access, task),
                 _ => None,
             };
 
@@ -259,8 +240,8 @@ where
         Poll::Pending
     }
 
-    fn clear(scheduler: &mut Serial<A>, control: &Control) {
-        scheduler.exclusive.clear(control);
+    fn clear(scheduler: &mut Serial<A>, _control: &Control) {
+        let _ = scheduler;
     }
 }
 
@@ -272,28 +253,20 @@ where
     P: InterleavedProfile<A>,
 {
     fn is_idle(scheduler: &mut P) -> bool {
-        let state = scheduler.state();
-        state.exclusive.is_empty() && !state.has_interleaved()
+        !scheduler.state().has_interleaved()
     }
 
     fn poll_actor_replies(
         scheduler: &mut P,
-        actor: &mut A,
-        scope: &mut crate::ActorScope<'_, A>,
         control: &Control,
         expected_mode: Mode,
         task: &mut Context<'_>,
     ) -> Poll<()> {
-        let state = scheduler.state();
-        if !state.exclusive.is_empty() {
-            state
-                .exclusive
-                .poll(actor, scope, control, expected_mode, task)
-        } else {
-            match state.queue.poll(actor, scope, control, expected_mode, task) {
-                InterleavedPoll::Pending | InterleavedPoll::BudgetExhausted => Poll::Pending,
-                InterleavedPoll::Progress => Poll::Ready(()),
-            }
+        match scheduler.state().queue.poll(control, expected_mode, task) {
+            InterleavedPoll::Pending
+            | InterleavedPoll::Leased
+            | InterleavedPoll::BudgetExhausted => Poll::Pending,
+            InterleavedPoll::Progress => Poll::Ready(()),
         }
     }
 
@@ -306,8 +279,17 @@ where
             return Poll::Ready(SchedulerTurn::LifecycleHint);
         }
 
-        if !scheduler.state().exclusive.is_empty() {
-            return poll_exclusive_turn(&mut scheduler.state().exclusive, turn, task);
+        if scheduler.state().queue.is_leased() {
+            return match scheduler
+                .state()
+                .queue
+                .poll(&turn.inner.control, turn.expected_mode, task)
+            {
+                InterleavedPoll::Progress => Poll::Ready(SchedulerTurn::Progress),
+                InterleavedPoll::Pending
+                | InterleavedPoll::Leased
+                | InterleavedPoll::BudgetExhausted => Poll::Pending,
+            };
         }
 
         let start = scheduler.state().cursor;
@@ -320,14 +302,13 @@ where
                 InterleavedLane::Mailbox
                     if turn.receive_messages && scheduler.state().has_dispatch_capacity() =>
                 {
-                    let mut scope = turn.state.actor_scope(turn.actor_ref);
                     let mut dispatched = 0;
                     loop {
                         match turn.inbox.poll_recv(task) {
                             Poll::Ready(Some(envelope)) => {
-                                envelope.dispatch(
-                                    turn.actor, &mut scope, turn.owned, scheduler, turn.inner,
-                                );
+                                let (actor, mut scope) = turn.access.parts();
+                                envelope
+                                    .dispatch(actor, &mut scope, turn.owned, scheduler, turn.inner);
                                 dispatched += 1;
                             }
                             Poll::Ready(None) => break Some(SchedulerTurn::InboxClosed),
@@ -353,23 +334,21 @@ where
                     }
                 }
                 InterleavedLane::Interleaved if scheduler.state().has_interleaved() => {
-                    let mut scope = turn.state.actor_scope(turn.actor_ref);
                     match scheduler.state().queue.poll(
-                        turn.actor,
-                        &mut scope,
                         &turn.inner.control,
                         turn.expected_mode,
                         task,
                     ) {
                         InterleavedPoll::Pending => None,
                         InterleavedPoll::Progress => Some(SchedulerTurn::Progress),
+                        InterleavedPoll::Leased => return Poll::Pending,
                         InterleavedPoll::BudgetExhausted => {
                             scheduler.state().cursor = lane.next();
                             return Poll::Pending;
                         }
                     }
                 }
-                InterleavedLane::ChildExit => poll_child(turn.state, task),
+                InterleavedLane::ChildExit => poll_child(turn.access, task),
                 _ => None,
             };
 
@@ -389,42 +368,15 @@ where
     }
 
     fn clear(scheduler: &mut P, control: &Control) {
-        let state = scheduler.state();
-        state.exclusive.clear(control);
-        state.queue.clear(control);
-    }
-}
-
-fn poll_exclusive_turn<A: Actor>(
-    exclusive: &mut Exclusive<A>,
-    turn: &mut TurnContext<'_, A>,
-    task: &mut Context<'_>,
-) -> Poll<SchedulerTurn> {
-    let mut scope = turn.state.actor_scope(turn.actor_ref);
-    let ready = exclusive
-        .poll(
-            turn.actor,
-            &mut scope,
-            &turn.inner.control,
-            turn.expected_mode,
-            task,
-        )
-        .is_ready();
-    if turn.inner.control.mode() != turn.expected_mode {
-        return Poll::Ready(SchedulerTurn::LifecycleHint);
-    }
-    if ready {
-        Poll::Ready(SchedulerTurn::Progress)
-    } else {
-        Poll::Pending
+        scheduler.state().queue.clear(control);
     }
 }
 
 fn poll_child<A: Actor>(
-    state: &mut ScopeState<A>,
+    access: &mut ActorAccess<A>,
     task: &mut Context<'_>,
 ) -> Option<SchedulerTurn> {
-    match state.poll_child_exit(task) {
+    match access.state().poll_child_exit(task) {
         Poll::Ready(event) => Some(SchedulerTurn::Child(event)),
         Poll::Pending => None,
     }

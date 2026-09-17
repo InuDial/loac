@@ -1,0 +1,8 @@
+error: lifetime may not live long enough
+  --> tests/ui/fail/cx_closure_borrow_escape.rs:15:29
+   |
+15 |     cx.with(|actor, _scope| move || actor.0)
+   |              -----        - ^^^^^^^^^^^^^^^ returning this value requires that `'1` must outlive `'2`
+   |              |            |
+   |              |            return type of closure `{closure@$DIR/tests/ui/fail/cx_closure_borrow_escape.rs:15:29: 15:36}` contains a lifetime `'2`
+   |              has type `&'1 mut Worker`

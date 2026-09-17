@@ -4,8 +4,7 @@ use std::{
 };
 
 use loac::{
-    Actor, ActorFutureExt, ActorScope, DispatchHandler, ExitReason, IntoActorFuture, Message,
-    ReplyExt, SpawnOptions, StopScope, actor, spawn_with,
+    Actor, ActorScope, Cx, ExitReason, Handler, Message, SpawnOptions, StopScope, actor, spawn_with,
 };
 use tokio::sync::oneshot;
 
@@ -21,7 +20,7 @@ pub(super) struct LifecycleArgs {
     cleanup: Arc<Mutex<Vec<ExitReason>>>,
 }
 
-#[actor(mailbox = dynamic)]
+#[actor(mailbox = dynamic, interleaved)]
 impl Actor for LifecycleActor {
     type SpawnArgs = LifecycleArgs;
 
@@ -55,27 +54,17 @@ impl Step {
     }
 }
 
-impl DispatchHandler<Step> for LifecycleActor {
-    fn handle(
-        &mut self,
-        mut message: Step,
-        _scope: &mut ActorScope<'_, Self>,
-    ) -> impl loac::IntoReply<Self, Step> + use<> {
-        async move {
-            if let Some(entered) = message.entered.take() {
-                let _ = entered.send(());
-            }
-            if let Some(release) = message.release.take() {
-                let _ = release.await;
-            }
-            message.id
+impl Handler<Step> for LifecycleActor {
+    async fn handle(mut message: Step, mut cx: Cx<'_, Self>) -> u8 {
+        let mut guard = cx.exclusive();
+        if let Some(entered) = message.entered.take() {
+            let _ = entered.send(());
         }
-        .into_actor()
-        .map(|id, actor: &mut Self, _scope| {
-            lock(&actor.handled).push(id);
-            id
-        })
-        .exclusive()
+        if let Some(release) = message.release.take() {
+            let _ = release.await;
+        }
+        guard.with(|actor, _| lock(&actor.handled).push(message.id));
+        message.id
     }
 }
 

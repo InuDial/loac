@@ -18,7 +18,7 @@ use std::{
 };
 
 use loac::{
-    Actor, ActorScope, DispatchHandler, IntoActorFuture, Message, ReplyExt, SpawnOptions, actor,
+    Actor, ActorScope, Cx, DispatchHandler, Handler, Message, ReplyExt, SpawnOptions, actor,
 };
 use tokio::sync::oneshot;
 
@@ -28,7 +28,7 @@ struct SerialActor {
     committed: Arc<Mutex<Vec<u8>>>,
 }
 
-#[actor(mailbox = dynamic)]
+#[actor(mailbox = dynamic, interleaved)]
 impl Actor for SerialActor {
     type SpawnArgs = Arc<Mutex<Vec<u8>>>;
 
@@ -44,18 +44,11 @@ struct Block {
     release: oneshot::Receiver<()>,
 }
 
-impl DispatchHandler<Block> for SerialActor {
-    fn handle(
-        &mut self,
-        message: Block,
-        _scope: &mut ActorScope<Self>,
-    ) -> impl loac::IntoReply<Self, Block> + use<> {
-        async move {
-            let _ = message.entered.send(());
-            let _ = message.release.await;
-        }
-        .into_actor()
-        .exclusive()
+impl Handler<Block> for SerialActor {
+    async fn handle(message: Block, mut cx: Cx<'_, Self>) {
+        let _guard = cx.exclusive();
+        let _ = message.entered.send(());
+        let _ = message.release.await;
     }
 }
 
@@ -68,7 +61,7 @@ impl DispatchHandler<Record> for SerialActor {
         &mut self,
         message: Record,
         _scope: &mut ActorScope<Self>,
-    ) -> impl loac::IntoReply<Self, Record> + use<> {
+    ) -> impl loac::IntoReply<Self, Record> {
         lock(&self.committed).push(message.0);
         message.0.ready()
     }
@@ -83,7 +76,7 @@ impl DispatchHandler<Notify> for SerialActor {
         &mut self,
         message: Notify,
         _scope: &mut ActorScope<Self>,
-    ) -> impl loac::IntoReply<Self, Notify> + use<> {
+    ) -> impl loac::IntoReply<Self, Notify> {
         lock(&self.committed).push(message.0);
         ().ready()
     }

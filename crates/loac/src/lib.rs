@@ -157,19 +157,15 @@
 //! | --- | --- | --- |
 //! | ready | [`value.ready()`](ReplyExt::ready) from a [`DispatchHandler`] or [`SyncHandler`] | The reply is already complete during dispatch |
 //! | owned | A bare [`Future`] from a [`DispatchHandler`] | A Tokio task runs it beside all actor work |
-//! | interleaved | [`Handler`] async fn, [`StreamHandler`] async fn, [`future.interleaved()`](InterleavedFutureExt::interleaved), or [`ActorScope::cx_reply`] / [`ActorScope::cx_stream`] from a [`DispatchHandler`] | The actor task polls it fairly with mailbox, lifecycle, and other interleaved work |
-//! | exclusive | [`future.exclusive()`](ReplyExt::exclusive), [`ActorScope::cx_exclusive`], or [`ActorScope::cx_stream_exclusive`] from a [`DispatchHandler`] | Mailbox and actor-aware work pause until it finishes; owned tasks continue |
+//! | interleaved | [`Handler`], [`StreamHandler`], or [`future.interleaved()`](InterleavedFutureExt::interleaved) | The actor task polls it fairly with other actor work |
 //!
 //! [`Handler`] and [`StreamHandler`] always select interleaved scheduling, so
-//! they require [`HasInterleaving`]. A [`DispatchHandler`] may select any
-//! strategy. `ready` and `exclusive` need no interleaving capability.
-//!
-//! The `cx` constructors on [`ActorScope`] pair [`Cx`] access with an explicit
-//! scheduling lane. Use [`ActorScope::cx_reply`] / [`ActorScope::cx_stream`]
-//! for interleaved replies, and [`ActorScope::cx_exclusive`] /
-//! [`ActorScope::cx_stream_exclusive`] for exclusive replies. Call them inside
-//! a [`DispatchHandler`] implementation; the returned future accesses actor
-//! and scope through [`Cx::with`].
+//! they require [`HasInterleaving`].
+//! [`DispatchHandler`] selects ready, owned, or interleaved scheduling.
+//! A cx future accesses actor state through [`Cx::with`].
+//! [`Cx::exclusive`] returns a scoped scheduler lease.
+//! Scheduled actor work pauses until that guard drops.
+//! Graceful `on_shutdown` hooks may still preempt the lease.
 //! See [`reply`] for cancellation, panic, and scheduling details.
 //! See [`scheduling`] for built-in scheduling profiles.
 //!
@@ -211,9 +207,9 @@
 //! Initialization and lifecycle hooks are serial.
 //! They pause handler dispatch while pending.
 //! Awaiting a self-call requires a later mailbox dispatch.
-//! It cannot complete during initialization or exclusive work.
+//! It cannot complete during initialization or a scheduler lease.
 //! Communication cycles can therefore wait indefinitely.
-//! Use [`map`](ActorFutureExt::map) or [`then`](ActorFutureExt::then) for local sequencing.
+//! Use [`Cx::with`] between awaits for local sequencing.
 //!
 //! # Advanced configuration
 //!
@@ -244,7 +240,6 @@ mod actor;
 mod address;
 mod config;
 mod error;
-mod future;
 mod lifecycle;
 mod mailbox;
 mod owned;
@@ -255,7 +250,7 @@ pub mod supervision;
 pub mod transport;
 mod writer;
 
-pub use access::Cx;
+pub use access::{Cx, ExclusiveGuard};
 pub use actor::{
     Actor, DispatchHandler, Handler, HasChildren, HasInterleaving, HasMailbox, HasReply, Message,
     StreamHandler, SyncHandler,
@@ -269,15 +264,13 @@ pub use error::{
     CallError, SendError, SendToError, TryCallError, TryCallErrorKind, TrySendError,
     TrySendErrorKind,
 };
-pub use future::{ActorFuture, ActorFutureExt, FutureActor, IntoActorFuture, Map, Then};
 pub use lifecycle::{
     Child, ChildExit, ChildId, ExitReason, ExitStatus, Shutdown, ShutdownStatus, SubtreeStatus,
 };
 pub use loac_macros::{Message, actor, sync_handler};
 pub use reply::{
-    CxExclusive, CxReply, CxStream, CxStreamExclusive, InterleavedFutureExt, IntoReply,
-    IntoStreamReply, Items, ReplyExt, SingleKind, StreamDispatch, StreamKind, StreamMessage,
-    StreamReply,
+    InterleavedFutureExt, IntoReply, IntoStreamReply, Items, ReplyExt, SingleKind, StreamDispatch,
+    StreamKind, StreamMessage, StreamReply,
 };
 pub use runtime::{
     ActorOwner, ActorScope, ActorSpawner, SpawnOptions, StopScope, spawn, spawn_with,
@@ -315,12 +308,11 @@ pub mod __private {
 /// remain explicit imports so operational behavior stays visible at call sites.
 pub mod prelude {
     pub use crate::{
-        Actor, ActorFuture, ActorFutureExt, ActorScope, ActorSpawner, Cx, CxExclusive, CxReply,
-        CxStream, CxStreamExclusive, DispatchHandler, DynamicChildrenOptions,
+        Actor, ActorScope, ActorSpawner, Cx, DispatchHandler, DynamicChildrenOptions,
         DynamicInterleavingOptions, DynamicMailboxOptions, Handler, HasChildren, HasInterleaving,
-        HasMailbox, HasReply, InterleavedFutureExt, IntoActorFuture, IntoReply, IntoStreamReply,
-        Items, Message, ReplyExt, SingleKind, StopScope, StreamHandler, StreamKind, StreamMessage,
-        StreamOut, StreamReply, SyncHandler, Writer, actor, reply, sync_handler,
+        HasMailbox, HasReply, InterleavedFutureExt, IntoReply, IntoStreamReply, Items, Message,
+        ReplyExt, SingleKind, StopScope, StreamHandler, StreamKind, StreamMessage, StreamOut,
+        StreamReply, SyncHandler, Writer, actor, reply, sync_handler,
     };
 }
 

@@ -18,7 +18,7 @@
 //!
 //! Ready replies finish during dispatch.
 //! Owned replies run in separate Tokio tasks.
-//! Exclusive replies run one at a time in every profile.
+//! A [`Cx`](crate::Cx) reply may hold a scheduler lease.
 
 mod profile;
 mod queue;
@@ -26,23 +26,104 @@ mod runtime;
 mod state;
 
 use std::{
+    future::Future,
     panic::{self, AssertUnwindSafe},
     pin::Pin,
+    sync::Arc,
+    task::{Context, Poll},
 };
 
-use crate::{ActorFuture, mailbox::Control};
+use crate::{
+    Actor,
+    access::{ReplyLease, ScopedLease},
+    mailbox::Control,
+};
 
 pub use profile::{
-    Disabled, Dynamic, Fixed, InterleavedScheduler, ReplyScheduler, SchedulerProfile, Serial,
-    Unbounded,
+    Disabled, Dynamic, Fixed, InterleavedScheduler, SchedulerProfile, Serial, Unbounded,
 };
 pub(crate) use runtime::{ActorScheduler, RuntimeScheduler, SchedulerTurn, Seal, TurnContext};
 pub(crate) use state::{
-    DynamicLimit, Exclusive, FixedLimit, InterleavedLane, InterleavedProfile, InterleavedState,
-    SerialLane, UnboundedLimit,
+    DynamicLimit, FixedLimit, InterleavedLane, InterleavedProfile, InterleavedState, SerialLane,
+    UnboundedLimit,
 };
 
-pub(crate) type ErasedActorFuture<A> = Pin<Box<dyn ActorFuture<A, Output = ()> + Send + 'static>>;
+pub(crate) struct ScheduledFuture {
+    future: Pin<Box<dyn Future<Output = ()> + Send + 'static>>,
+    lease: Option<Arc<ReplyLease>>,
+}
+
+impl ScheduledFuture {
+    pub(crate) fn new<F>(future: F) -> Self
+    where
+        F: Future<Output = ()> + Send + 'static,
+    {
+        Self {
+            future: Box::pin(future),
+            lease: None,
+        }
+    }
+
+    /// Erases one actor-scoped future after establishing its runtime owner.
+    ///
+    /// The scheduler owns both the future and its lease afterward.
+    /// Keeping them together makes their cancellation order explicit.
+    #[allow(unsafe_code)]
+    pub(crate) fn scoped<'actor, A, F>(future: F, lease: ScopedLease<'actor, A>) -> Self
+    where
+        A: Actor,
+        F: Future<Output = ()> + Send + 'actor,
+    {
+        let lease = lease.into_inner();
+        let future: Pin<Box<dyn Future<Output = ()> + Send + 'actor>> = Box::pin(future);
+        // SAFETY: actor-scoped futures enter only their actor's scheduler.
+        // The actor task is their sole poller and cancellation owner.
+        // RunningActor drops its scheduler before its pinned actor storage.
+        // Cx exposes actor borrows only through higher-ranked closures.
+        // The paired lease serializes every actor-aware future poll.
+        let future = unsafe {
+            std::mem::transmute::<
+                Pin<Box<dyn Future<Output = ()> + Send + 'actor>>,
+                Pin<Box<dyn Future<Output = ()> + Send + 'static>>,
+            >(future)
+        };
+        Self {
+            future,
+            lease: Some(lease),
+        }
+    }
+
+    fn poll(&mut self, task: &mut Context<'_>) -> Poll<()> {
+        self.future.as_mut().poll(task)
+    }
+
+    fn is_leased(&self) -> bool {
+        self.lease.as_ref().is_some_and(|lease| lease.is_held())
+    }
+
+    /// Wraps ordinary test work with an inactive lease.
+    #[cfg(test)]
+    pub(crate) fn test<F>(future: F) -> Self
+    where
+        F: Future<Output = ()> + Send + 'static,
+    {
+        Self::new(future)
+    }
+
+    /// Wraps test work with a lease acquired after queue insertion.
+    #[cfg(test)]
+    pub(crate) fn test_scoped<F>(future: F) -> (Self, Arc<ReplyLease>)
+    where
+        F: Future<Output = ()> + Send + 'static,
+    {
+        let lease = ReplyLease::new();
+        let scheduled = Self {
+            future: Box::pin(future),
+            lease: Some(Arc::clone(&lease)),
+        };
+        (scheduled, lease)
+    }
+}
 
 // Automatic frame destruction cannot borrow the actor's lifecycle control.
 // Isolate each value so one Drop panic cannot skip sibling cleanup.

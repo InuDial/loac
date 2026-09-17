@@ -38,7 +38,7 @@ impl DispatchHandler<Ready> for ReplyActor {
         &mut self,
         _message: Ready,
         _scope: &mut ActorScope<Self>,
-    ) -> impl IntoReply<Self, Ready> + use<> {
+    ) -> impl IntoReply<Self, Ready> {
         1.ready()
     }
 }
@@ -52,7 +52,7 @@ impl DispatchHandler<Owned> for ReplyActor {
         &mut self,
         _message: Owned,
         _scope: &mut ActorScope<Self>,
-    ) -> impl IntoReply<Self, Owned> + use<> {
+    ) -> impl IntoReply<Self, Owned> {
         // All asynchronous modes share this concrete base future.
         // Counts therefore isolate wrappers and execution ownership.
         std::future::ready(1)
@@ -68,8 +68,8 @@ impl DispatchHandler<Interleaved> for ReplyActor {
         &mut self,
         _message: Interleaved,
         _scope: &mut ActorScope<Self>,
-    ) -> impl IntoReply<Self, Interleaved> + use<> {
-        std::future::ready(1).into_actor().interleaved()
+    ) -> impl IntoReply<Self, Interleaved> {
+        std::future::ready(1).interleaved()
     }
 }
 
@@ -77,13 +77,10 @@ impl DispatchHandler<Interleaved> for ReplyActor {
 #[message(reply = u64)]
 struct Exclusive;
 
-impl DispatchHandler<Exclusive> for ReplyActor {
-    fn handle(
-        &mut self,
-        _message: Exclusive,
-        _scope: &mut ActorScope<Self>,
-    ) -> impl IntoReply<Self, Exclusive> + use<> {
-        std::future::ready(1).into_actor().exclusive()
+impl Handler<Exclusive> for ReplyActor {
+    async fn handle(_message: Exclusive, mut cx: Cx<'_, Self>) -> u64 {
+        let _guard = cx.exclusive();
+        1
     }
 }
 

@@ -6,8 +6,6 @@ use std::{
 
 use tokio::sync::oneshot;
 
-use std::{future::Future, pin::Pin};
-
 use crate::{
     Actor, ActorScope, CallError, DispatchHandler, HasInterleaving, Message, StreamHandler,
     StreamMessage, StreamOut, Writer,
@@ -338,7 +336,6 @@ impl<M: StreamMessage, W> StreamToEnvelope<M, W> {
     }
 }
 
-#[allow(unsafe_code)]
 impl<A, M, W> Envelope<A> for StreamToEnvelope<M, W>
 where
     A: StreamHandler<M> + HasInterleaving,
@@ -381,19 +378,12 @@ where
             None => DispatchReply::one_way(permit),
         };
 
-        let cx = Cx::new(actor, scope);
+        let (cx, lease) = Cx::new(actor, scope);
         let out = StreamOut::new(out);
-        let future = Box::pin(<A as StreamHandler<M>>::handle(message, out, cx))
-            as Pin<Box<dyn Future<Output = M::Final> + Send + '_>>;
-        // SAFETY: the lifetime covers `Cx` access and `StreamOut` ownership.
-        // The runtime polls this reply only on its actor task.
-        // It drops the reply before actor, address, or scope teardown.
-        let future: Pin<Box<dyn Future<Output = M::Final> + Send + 'static>> =
-            unsafe { std::mem::transmute(future) };
-        let strategy = crate::reply::CxStream {
-            future,
-            _actor: std::marker::PhantomData,
-        };
+        // Dispatch still owns its exclusive actor borrow.
+        // Defer user construction until the first scheduled poll.
+        let future = async move { <A as StreamHandler<M>>::handle(message, out, cx).await };
+        let strategy = crate::reply::CxStream::new(future, lease);
         HandleStreamCall::<A, M>::handle_stream_call(strategy, owned, scheduler, reply);
     }
 

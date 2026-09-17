@@ -1,20 +1,14 @@
-use std::{
-    num::NonZeroUsize,
-    task::{Context, Poll},
-};
+use std::{marker::PhantomData, num::NonZeroUsize};
 
-use crate::{
-    Actor, ActorFuture, ActorScope,
-    mailbox::{Control, Mode},
-};
+use crate::Actor;
 
-use super::{Dynamic, ErasedActorFuture, Fixed, Unbounded, drop_without_unwind, queue::Queue};
+use super::{Dynamic, Fixed, ScheduledFuture, Unbounded, queue::Queue};
 
 pub(crate) struct InterleavedState<A: Actor, L> {
-    pub(super) queue: Queue<A>,
-    pub(super) exclusive: Exclusive<A>,
+    pub(super) queue: Queue,
     pub(super) limit: L,
     pub(crate) cursor: InterleavedLane,
+    actor: PhantomData<fn() -> A>,
 }
 
 pub(crate) trait InterleavedProfile<A: Actor>: Send + 'static {
@@ -79,21 +73,21 @@ impl<A: Actor, L: LimitPolicy> InterleavedState<A, L> {
     pub(super) fn with_limit(limit: L) -> Self {
         Self {
             queue: Queue::new(),
-            exclusive: Exclusive::new(),
             limit,
             cursor: InterleavedLane::Mailbox,
+            actor: PhantomData,
         }
     }
 
     pub(crate) fn has_dispatch_capacity(&self) -> bool {
-        self.exclusive.is_empty() && self.limit.has_capacity(self.queue.len())
+        !self.queue.is_leased() && self.limit.has_capacity(self.queue.len())
     }
 
     pub(crate) fn has_interleaved(&self) -> bool {
         !self.queue.is_empty()
     }
 
-    pub(super) fn push_interleaved(&mut self, future: ErasedActorFuture<A>) {
+    pub(super) fn push_interleaved(&mut self, future: ScheduledFuture) {
         debug_assert!(self.has_dispatch_capacity());
         self.queue.push(future);
     }
@@ -127,70 +121,6 @@ impl InterleavedLane {
             Self::Mailbox => Self::Interleaved,
             Self::Interleaved => Self::ChildExit,
             Self::ChildExit => Self::Mailbox,
-        }
-    }
-}
-
-pub(crate) struct Exclusive<A: Actor> {
-    future: Option<ErasedActorFuture<A>>,
-}
-
-impl<A: Actor> Exclusive<A> {
-    pub(super) fn new() -> Self {
-        Self { future: None }
-    }
-
-    pub(super) fn is_empty(&self) -> bool {
-        self.future.is_none()
-    }
-
-    pub(super) fn push<F>(&mut self, future: F)
-    where
-        F: ActorFuture<A, Output = ()> + Send + 'static,
-    {
-        debug_assert!(self.future.is_none(), "exclusive work cannot overlap");
-        self.future = Some(Box::pin(future));
-    }
-
-    pub(super) fn poll(
-        &mut self,
-        actor: &mut A,
-        scope: &mut ActorScope<'_, A>,
-        control: &Control,
-        expected_mode: Mode,
-        task: &mut Context<'_>,
-    ) -> Poll<()> {
-        if control.mode() != expected_mode {
-            return Poll::Ready(());
-        }
-        let Some(future) = &mut self.future else {
-            return Poll::Pending;
-        };
-        let result = future.as_mut().poll(actor, scope, task);
-        if result.is_ready() {
-            let completed = self
-                .future
-                .take()
-                .expect("the completed exclusive future remains owned");
-            control.drop_user_value(completed);
-        }
-        if control.mode() != expected_mode {
-            return Poll::Ready(());
-        }
-        result
-    }
-
-    pub(super) fn clear(&mut self, control: &Control) {
-        if let Some(future) = self.future.take() {
-            control.drop_user_value(future);
-        }
-    }
-}
-
-impl<A: Actor> Drop for Exclusive<A> {
-    fn drop(&mut self) {
-        if let Some(future) = self.future.take() {
-            drop_without_unwind(future);
         }
     }
 }

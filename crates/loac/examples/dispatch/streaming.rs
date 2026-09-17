@@ -26,7 +26,7 @@ impl DispatchHandler<Subscribe, StreamKind> for Provider {
         &mut self,
         _message: Subscribe,
         _scope: &mut ActorScope<Self>,
-    ) -> impl loac::IntoReply<Self, Subscribe> + use<> {
+    ) -> impl loac::IntoReply<Self, Subscribe> {
         let (item_tx, item_rx) = tokio::sync::mpsc::channel::<u8>(8);
         let (final_tx, final_rx) = tokio::sync::oneshot::channel::<()>();
         let strategy = async move {

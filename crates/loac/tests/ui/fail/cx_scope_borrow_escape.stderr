@@ -1,0 +1,25 @@
+error: lifetime may not live long enough
+  --> tests/ui/fail/cx_scope_borrow_escape.rs:15:29
+   |
+15 |     cx.with(|_actor, scope| scope)
+   |              ------       - ^^^^^ returning this value requires that `'1` must outlive `'2`
+   |              |            |
+   |              |            return type of closure is &mut loac::ActorScope<'2, Worker>
+   |              has type `&'1 mut Worker`
+   |
+   = note: requirement occurs because of a mutable reference to `loac::ActorScope<'_, Worker>`
+   = note: mutable references are invariant over their type parameter
+   = help: see <https://doc.rust-lang.org/nomicon/subtyping.html> for more information about variance
+
+error: lifetime may not live long enough
+  --> tests/ui/fail/cx_scope_borrow_escape.rs:15:29
+   |
+14 | fn escape<'a>(cx: &'a mut Cx<'_, Worker>) -> &'a mut ActorScope<'a, Worker> {
+   |           -- lifetime `'a` defined here
+15 |     cx.with(|_actor, scope| scope)
+   |                             ^^^^^ returning this value requires that `'a` must outlive `'static`
+   |
+help: consider adding 'move' keyword before the nested closure
+   |
+15 |     cx.with(move |_actor, scope| scope)
+   |             ++++

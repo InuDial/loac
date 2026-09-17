@@ -24,6 +24,7 @@ use crate::{
     },
 };
 
+mod access;
 mod actor_loop;
 mod scope;
 mod shutdown;
@@ -32,6 +33,7 @@ mod task;
 #[cfg(test)]
 mod tests;
 
+pub(crate) use access::{ActorAccess, CxTarget};
 #[allow(
     unused_imports,
     reason = "grouped re-export keeps one import surface for runtime tests and sibling modules"

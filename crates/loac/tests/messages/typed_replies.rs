@@ -23,7 +23,7 @@ impl DispatchHandler<Add> for Calculator {
         &mut self,
         message: Add,
         _scope: &mut ActorScope<Self>,
-    ) -> impl loac::IntoReply<Self, Add> + use<> {
+    ) -> impl loac::IntoReply<Self, Add> {
         self.0 += message.0;
         self.0.ready()
     }
@@ -38,7 +38,7 @@ impl DispatchHandler<Describe> for Calculator {
         &mut self,
         _message: Describe,
         _scope: &mut ActorScope<Self>,
-    ) -> impl loac::IntoReply<Self, Describe> + use<> {
+    ) -> impl loac::IntoReply<Self, Describe> {
         format!("count={}", self.0).ready()
     }
 }
@@ -66,7 +66,7 @@ impl DispatchHandler<Events> for Calculator {
         &mut self,
         _message: Events,
         _scope: &mut ActorScope<Self>,
-    ) -> impl loac::IntoReply<Self, Events> + use<> {
+    ) -> impl loac::IntoReply<Self, Events> {
         let (events, receiver) = mpsc::channel(2);
         events.try_send(1).expect("the stream buffer has room");
         events.try_send(2).expect("the stream buffer has room");

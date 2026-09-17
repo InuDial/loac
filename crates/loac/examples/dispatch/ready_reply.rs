@@ -22,7 +22,7 @@ impl DispatchHandler<Add> for Counter {
         &mut self,
         message: Add,
         _scope: &mut ActorScope<Self>,
-    ) -> impl loac::IntoReply<Self, Add> + use<> {
+    ) -> impl loac::IntoReply<Self, Add> {
         self.0 += message.0;
         self.0.ready()
     }
@@ -37,7 +37,7 @@ impl DispatchHandler<Reset> for Counter {
         &mut self,
         _message: Reset,
         _scope: &mut ActorScope<Self>,
-    ) -> impl loac::IntoReply<Self, Reset> + use<> {
+    ) -> impl loac::IntoReply<Self, Reset> {
         self.0 = 0;
         ().ready()
     }

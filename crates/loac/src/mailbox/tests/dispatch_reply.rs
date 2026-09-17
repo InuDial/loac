@@ -13,8 +13,8 @@ use std::{
 use tokio::sync::oneshot;
 
 use crate::{
-    Actor, ActorConfig, ActorScope, CallError, ExitReason, FutureActor, InterleavedFutureExt,
-    IntoActorFuture, Message, MessageConfig, ReplyExt, Shutdown, ShutdownStatus,
+    Actor, ActorConfig, ActorScope, CallError, ExitReason, InterleavedFutureExt, Message,
+    MessageConfig, ReplyExt, Shutdown, ShutdownStatus,
     owned::OwnedTasks,
     reply::{Either, Interleaved, Ready, sealed::HandleReply},
     scheduling::{InterleavedProfile, RuntimeScheduler},
@@ -79,7 +79,7 @@ fn owned_dispatch_promotion_retains_the_actor() {
 // Either selects first. Only scheduled work may retain the actor.
 #[test]
 fn either_promotes_only_the_escaping_branch() {
-    type Branch = Either<Ready<u8>, Interleaved<TestActor, FutureActor<TestActor, Pending<u8>>>>;
+    type Branch = Either<Ready<u8>, Interleaved<TestActor, Pending<u8>>>;
 
     let inner = actor_inner();
     let owned = OwnedTasks::new(Arc::clone(&inner));
@@ -103,7 +103,7 @@ fn either_promotes_only_the_escaping_branch() {
 
     let permit = inner.begin_dispatch().expect("dispatch wins the gate");
     let (sender, _receiver) = oneshot::channel();
-    let pending: FutureActor<TestActor, _> = std::future::pending::<u8>().into_actor();
+    let pending = std::future::pending::<u8>();
     let right = Branch::Right(pending.interleaved());
     <Branch as HandleReply<TestActor, TestMessage>>::handle(
         right,

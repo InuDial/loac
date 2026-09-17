@@ -20,7 +20,7 @@ impl DispatchHandler<Increment> for Counter {
         &mut self,
         _message: Increment,
         _scope: &mut ActorScope<Self>,
-    ) -> impl loac::IntoReply<Self, Increment> + use<> {
+    ) -> impl loac::IntoReply<Self, Increment> {
         self.0 += 1;
         self.0.ready()
     }
@@ -48,7 +48,7 @@ impl DispatchHandler<ChooseReply> for Counter {
         &mut self,
         message: ChooseReply,
         _scope: &mut ActorScope<Self>,
-    ) -> impl loac::IntoReply<Self, ChooseReply> + use<> {
+    ) -> impl loac::IntoReply<Self, ChooseReply> {
         if message.0 {
             reply::Either::Left(1.ready())
         } else {

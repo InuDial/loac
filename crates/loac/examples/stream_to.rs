@@ -67,7 +67,7 @@ impl DispatchHandler<Item> for ItemReceiver {
         &mut self,
         message: Item,
         _scope: &mut ActorScope<'_, Self>,
-    ) -> impl loac::IntoReply<Self, Item> + use<> {
+    ) -> impl loac::IntoReply<Self, Item> {
         self.items.push(message.0);
         ().ready()
     }
@@ -82,7 +82,7 @@ impl DispatchHandler<Dump> for ItemReceiver {
         &mut self,
         _message: Dump,
         _scope: &mut ActorScope<'_, Self>,
-    ) -> impl loac::IntoReply<Self, Dump> + use<> {
+    ) -> impl loac::IntoReply<Self, Dump> {
         std::mem::take(&mut self.items).ready()
     }
 }

@@ -8,7 +8,7 @@ use std::task::Poll;
 
 use loac::{
     Actor, ActorScope, CallError, Child, ChildExit, DispatchHandler, ExitReason,
-    InterleavedFutureExt, IntoActorFuture, Message, ReplyExt, Shutdown, SubtreeStatus, actor,
+    InterleavedFutureExt, Message, ReplyExt, Shutdown, SubtreeStatus, actor,
 };
 use tokio::sync::{mpsc, oneshot};
 
@@ -37,7 +37,7 @@ impl DispatchHandler<StopSelf> for ChildActor {
         &mut self,
         _message: StopSelf,
         scope: &mut ActorScope<'_, Self>,
-    ) -> impl loac::IntoReply<Self, StopSelf> + use<> {
+    ) -> impl loac::IntoReply<Self, StopSelf> {
         let _ = scope.request_shutdown(Shutdown::Stop);
         ().ready()
     }
@@ -52,7 +52,7 @@ impl DispatchHandler<PanicSelf> for ChildActor {
         &mut self,
         _message: PanicSelf,
         _scope: &mut ActorScope<'_, Self>,
-    ) -> impl loac::IntoReply<Self, PanicSelf> + use<> {
+    ) -> impl loac::IntoReply<Self, PanicSelf> {
         panic!("intentional child panic");
         #[allow(unreachable_code)]
         ().ready()
@@ -103,7 +103,7 @@ impl DispatchHandler<Observed> for Supervisor {
         &mut self,
         _message: Observed,
         _scope: &mut ActorScope<'_, Self>,
-    ) -> impl loac::IntoReply<Self, Observed> + use<> {
+    ) -> impl loac::IntoReply<Self, Observed> {
         self.observed.load(Ordering::SeqCst).ready()
     }
 }
@@ -117,7 +117,7 @@ impl DispatchHandler<ChildExitBarrier> for Supervisor {
         &mut self,
         _message: ChildExitBarrier,
         _scope: &mut ActorScope<'_, Self>,
-    ) -> impl loac::IntoReply<Self, ChildExitBarrier> + use<> {
+    ) -> impl loac::IntoReply<Self, ChildExitBarrier> {
         let mut yielded = false;
         std::future::poll_fn(move |task| {
             if yielded {
@@ -128,7 +128,6 @@ impl DispatchHandler<ChildExitBarrier> for Supervisor {
                 Poll::Pending
             }
         })
-        .into_actor()
         .interleaved()
     }
 }

@@ -7,7 +7,7 @@ use tokio::sync::oneshot;
 
 struct Counter(u64);
 
-#[actor(mailbox)]
+#[actor(mailbox, interleaved)]
 impl Actor for Counter {
     type SpawnArgs = u64;
 
@@ -24,29 +24,21 @@ struct AddAfter {
     resume: oneshot::Receiver<()>,
 }
 
-impl DispatchHandler<AddAfter> for Counter {
-    fn handle(
-        &mut self,
-        message: AddAfter,
-        _scope: &mut ActorScope<Self>,
-    ) -> impl IntoReply<Self, AddAfter> + use<> {
-        async move {
-            message
-                .started
-                .send(())
-                .expect("the example retains the started receiver");
-            message
-                .resume
-                .await
-                .expect("the example retains the resume sender");
-            message.amount
-        }
-        .into_actor()
-        .map(|amount, actor: &mut Self, _scope| {
-            actor.0 += amount;
+impl Handler<AddAfter> for Counter {
+    async fn handle(message: AddAfter, mut cx: Cx<'_, Self>) -> u64 {
+        let mut guard = cx.exclusive();
+        message
+            .started
+            .send(())
+            .expect("the example retains the started receiver");
+        message
+            .resume
+            .await
+            .expect("the example retains the resume sender");
+        guard.with(|actor, _| {
+            actor.0 += message.amount;
             actor.0
         })
-        .exclusive()
     }
 }
 
@@ -59,7 +51,7 @@ impl DispatchHandler<Read> for Counter {
         &mut self,
         _message: Read,
         _scope: &mut ActorScope<Self>,
-    ) -> impl IntoReply<Self, Read> + use<> {
+    ) -> impl IntoReply<Self, Read> {
         self.0.ready()
     }
 }
@@ -86,7 +78,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     resume_tx
         .send(())
-        .expect("the exclusive reply retains the resume receiver");
+        .expect("the leased reply retains the resume receiver");
     assert_eq!(addition.await?, 15);
     assert_eq!(read.await?, 15);
 

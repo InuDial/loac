@@ -11,7 +11,7 @@
 //!
 //! - a bare future runs as an owned Tokio task,
 //! - [`ReplyExt::ready`] completes the final value immediately,
-//! - [`ReplyExt::exclusive`] runs an actor-aware future with the mailbox paused,
+//! - [`Cx::exclusive`] pauses actor work within a cx future,
 //! - [`InterleavedFutureExt::interleaved`] runs an actor-aware future fairly
 //!   with other actor work, and
 //! - [`loac::reply::Either`] chooses between two strategies at runtime.
@@ -40,7 +40,7 @@ impl DispatchHandler<OwnedStream, StreamKind> for OwnedProvider {
         &mut self,
         message: OwnedStream,
         _scope: &mut ActorScope<'_, Self>,
-    ) -> impl loac::IntoReply<Self, OwnedStream> + use<> {
+    ) -> impl loac::IntoReply<Self, OwnedStream> {
         let (item_tx, item_rx) = tokio::sync::mpsc::channel::<u8>(8);
         let (final_tx, final_rx) = tokio::sync::oneshot::channel::<u8>();
         // A bare future selects owned scheduling: Tokio polls it in a
@@ -78,7 +78,7 @@ impl DispatchHandler<BranchStream, StreamKind> for BranchProvider {
         &mut self,
         message: BranchStream,
         _scope: &mut ActorScope<'_, Self>,
-    ) -> impl loac::IntoReply<Self, BranchStream> + use<> {
+    ) -> impl loac::IntoReply<Self, BranchStream> {
         let (item_tx, item_rx) = tokio::sync::mpsc::channel::<u8>(8);
         let (final_tx, final_rx) = tokio::sync::oneshot::channel::<u8>();
         let strategy = if message.0 == 0 {
@@ -107,7 +107,7 @@ struct ExclusiveStream(u8);
 
 struct ExclusiveProvider;
 
-#[actor(mailbox)]
+#[actor(mailbox, interleaved)]
 impl Actor for ExclusiveProvider {
     type SpawnArgs = ();
 
@@ -116,28 +116,22 @@ impl Actor for ExclusiveProvider {
     }
 }
 
-impl DispatchHandler<ExclusiveStream, StreamKind> for ExclusiveProvider {
-    fn handle(
-        &mut self,
+impl StreamHandler<ExclusiveStream> for ExclusiveProvider {
+    async fn handle<'a, W>(
         message: ExclusiveStream,
-        _scope: &mut ActorScope<'_, Self>,
-    ) -> impl loac::IntoReply<Self, ExclusiveStream> + use<> {
-        let (item_tx, item_rx) = tokio::sync::mpsc::channel::<u8>(8);
-        let (final_tx, final_rx) = tokio::sync::oneshot::channel::<u8>();
-        // An actor-aware future polled by the actor scheduler. The mailbox is
-        // paused while it runs, so keep exclusive stream work short.
-        let strategy = async move {
-            let mut out = item_tx;
-            for item in 0..message.0 {
-                if out.write(item).await.is_err() {
-                    break;
-                }
+        mut out: StreamOut<'a, W>,
+        mut cx: Cx<'a, Self>,
+    ) -> u8
+    where
+        W: Writer<u8> + Send + 'a,
+    {
+        let _guard = cx.exclusive();
+        for item in 0..message.0 {
+            if out.write(item).await.is_err() {
+                break;
             }
-            message.0
         }
-        .into_actor()
-        .exclusive();
-        loac::StreamDispatch::new(strategy, item_rx, final_tx, final_rx)
+        message.0
     }
 }
 
@@ -158,34 +152,23 @@ impl Actor for InterleavedProvider {
     }
 }
 
-impl DispatchHandler<InterleavedStream, StreamKind> for InterleavedProvider {
-    fn handle(
-        &mut self,
+impl StreamHandler<InterleavedStream> for InterleavedProvider {
+    async fn handle<'a, W>(
         _message: InterleavedStream,
-        _scope: &mut ActorScope<'_, Self>,
-    ) -> impl loac::IntoReply<Self, InterleavedStream> + use<> {
-        let (item_tx, item_rx) = tokio::sync::mpsc::channel::<u8>(8);
-        let (final_tx, final_rx) = tokio::sync::oneshot::channel::<u8>();
-        // Interleaved actor-aware work. The first stage sleeps without holding
-        // the mailbox, then `then` reads actor state and returns the second
-        // stage that owns the writer and produces the items.
-        let strategy = async { tokio::time::sleep(Duration::from_millis(10)).await }
-            .into_actor()
-            .then(move |(), actor: &mut Self, _scope| {
-                let seed = actor.seed;
-                let mut out = item_tx;
-                async move {
-                    for item in seed..seed + 3 {
-                        if out.write(item).await.is_err() {
-                            break;
-                        }
-                    }
-                    seed
-                }
-                .into_actor()
-            })
-            .interleaved();
-        loac::StreamDispatch::new(strategy, item_rx, final_tx, final_rx)
+        mut out: StreamOut<'a, W>,
+        mut cx: Cx<'a, Self>,
+    ) -> u8
+    where
+        W: Writer<u8> + Send + 'a,
+    {
+        tokio::time::sleep(Duration::from_millis(10)).await;
+        let seed = cx.with(|actor, _| actor.seed);
+        for item in seed..seed + 3 {
+            if out.write(item).await.is_err() {
+                break;
+            }
+        }
+        seed
     }
 }
 

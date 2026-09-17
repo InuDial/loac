@@ -20,6 +20,7 @@ cargo test --workspace --locked
 cargo doc --workspace --no-deps --locked
 ```
 
+See the [`Cx` safety argument](crates/loac/SAFETY.md).
 See the [release guide](docs/development/releasing.md) for publishing.
 
 ## License

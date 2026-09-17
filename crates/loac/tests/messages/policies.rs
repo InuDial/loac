@@ -29,7 +29,7 @@ impl DispatchHandler<Ping> for DynamicActor {
         &mut self,
         _message: Ping,
         _scope: &mut ActorScope<Self>,
-    ) -> impl loac::IntoReply<Self, Ping> + use<> {
+    ) -> impl loac::IntoReply<Self, Ping> {
         ().ready()
     }
 }
@@ -51,7 +51,7 @@ impl DispatchHandler<Ping> for CustomDynamicActor {
         &mut self,
         _message: Ping,
         _scope: &mut ActorScope<Self>,
-    ) -> impl loac::IntoReply<Self, Ping> + use<> {
+    ) -> impl loac::IntoReply<Self, Ping> {
         ().ready()
     }
 }
@@ -73,7 +73,7 @@ impl DispatchHandler<Ping> for FixedActor {
         &mut self,
         _message: Ping,
         _scope: &mut ActorScope<Self>,
-    ) -> impl loac::IntoReply<Self, Ping> + use<> {
+    ) -> impl loac::IntoReply<Self, Ping> {
         ().ready()
     }
 }
@@ -95,7 +95,7 @@ impl DispatchHandler<Ping> for UnboundedActor {
         &mut self,
         _message: Ping,
         _scope: &mut ActorScope<Self>,
-    ) -> impl loac::IntoReply<Self, Ping> + use<> {
+    ) -> impl loac::IntoReply<Self, Ping> {
         ().ready()
     }
 }

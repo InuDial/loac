@@ -93,7 +93,7 @@ mod sync_handler;
 /// Their reply modes are not known yet.
 /// All queued messages therefore wait behind the same limit.
 /// Omitting `interleaved` removes that capability and its queue.
-/// Exclusive replies remain available.
+/// Owned replies remain available.
 /// The option requires `mailbox`.
 ///
 /// # Child actors

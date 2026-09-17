@@ -25,10 +25,9 @@ Prefer `Handler<M>` with an async `cx` future.
 Implement `DispatchHandler<M>` directly when the reply must select an explicit
 strategy, such as returning `.ready()` during dispatch.
 
-For explicit dispatch handlers that still want cx-style access, `ActorScope`
-provides `cx_reply` / `cx_stream` for interleaved lane replies and
-`cx_exclusive` / `cx_stream_exclusive` for exclusive lane replies.
-Call them inside the handler and use `Cx::with` inside the returned future.
+`Handler` and `StreamHandler` receive a `Cx` handle.
+Use `Cx::with` for temporary actor access.
+Use `Cx::exclusive` for a scoped scheduler lease.
 
 ## Streaming
 
@@ -40,7 +39,7 @@ creates a bounded item channel and returns the receiver side to the caller as a
 | --- | --- |
 | [`stream_to`](stream_to.rs) | Primary `StreamHandler`: caller-provided writers through `call_to`/`send_to`. |
 | [`streaming`](dispatch/streaming.rs) | Explicit stream dispatch: a bare future writes items through the runtime channel. |
-| [`stream_strategies`](dispatch/stream_strategies.rs) | Explicit stream scheduling: owned, ready/`Either`, exclusive, and interleaved. |
+| [`stream_strategies`](dispatch/stream_strategies.rs) | Stream scheduling with owned, ready, leased, and interleaved work. |
 
 `call` returns a `StreamReply`. Read items with `recv` or `items`, then `finish`
 returns the final value. The item stream closes when the handler drops the
@@ -72,19 +71,19 @@ A reply strategy controls actor progress after handler dispatch.
 | Example | Focus |
 | --- | --- |
 | [`explicit_replies`](dispatch/replies/explicit_replies.rs) | Select ready or owned work at runtime. |
-| [`interleaved_reply`](dispatch/replies/interleaved_reply.rs) | Build a dispatch-handler cx future on the interleaved lane (`cx_reply`). |
-| [`exclusive_reply`](dispatch/replies/exclusive_reply.rs) | Pause mailbox work until actor-aware work completes. |
-| [`cx_exclusive`](dispatch/cx_exclusive.rs) | Build dispatch-handler cx futures on the exclusive lane (`cx_exclusive`, `cx_stream_exclusive`). |
+| [`interleaved_reply`](dispatch/replies/interleaved_reply.rs) | Use a cx future on the interleaved lane. |
+| [`exclusive_reply`](dispatch/replies/exclusive_reply.rs) | Pause actor work with a scheduler lease. |
+| [`cx_exclusive`](dispatch/cx_exclusive.rs) | Use scheduler leases in regular and streaming handlers. |
 
 Use `DispatchHandler<M>` when the reply needs an explicit strategy.
 Return a bare `Future` for independent async work.
 Use `interleaved` for cooperative actor-aware work.
-Use `exclusive` when that work requires actor isolation.
+Use `Cx::exclusive` for scoped actor isolation.
 
 The bare `interleaved` option uses a fixed limit of 32.
 Dynamic options allow `with_max_in_flight` per spawn.
-Omitting the option provides no interleaving capability; exclusive and owned
-replies still work.
+Omitting the option removes cx and interleaved replies.
+Owned replies still work.
 Unbounded interleaving can retain arbitrarily many active replies.
 
 ## Actor topology

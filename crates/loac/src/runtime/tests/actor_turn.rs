@@ -9,28 +9,26 @@ use std::{
 };
 
 use crate::{
-    Actor, ActorConfig, ActorRef, ActorScope, ChildExit, ChildId, ExitReason, ExitStatus,
-    HasMailbox, IntoActorFuture, Shutdown, SubtreeStatus,
+    Actor, ActorConfig, ActorScope, ChildExit, ChildId, ExitReason, ExitStatus, HasMailbox,
+    Shutdown, SubtreeStatus,
     mailbox::{ActorInbox, ActorInner, Control, Envelope, Mode},
     owned::OwnedTasks,
     scheduling::{
-        ActorScheduler, InterleavedLane, InterleavedProfile, InterleavedScheduler, ReplyScheduler,
-        RuntimeScheduler, SchedulerTurn, Seal,
+        ActorScheduler, InterleavedLane, InterleavedProfile, InterleavedScheduler,
+        RuntimeScheduler, ScheduledFuture, SchedulerTurn, Seal,
     },
     supervision::runtime::tests::ChildrenFixture,
     transport::MessageConfig,
 };
 
-use super::super::{ScopeState, actor_turn};
+use super::super::{ActorAccess, actor_turn};
 use super::{
     CountEnvelope, TestActor, actor_ref, enqueue_test_envelope, scope_state, test_actor_inner,
 };
 
 /// Owns all inputs for focused actor-turn tests.
 struct ActorTurnFixture<A: Actor> {
-    actor: A,
-    actor_ref: ActorRef<A>,
-    state: ScopeState<A>,
+    access: ActorAccess<A>,
     inbox: ActorInbox<A>,
     inner: Arc<ActorInner<A>>,
     owned: OwnedTasks<A>,
@@ -48,9 +46,7 @@ impl<A: Actor> ActorTurnFixture<A> {
         let actor_ref = actor_ref(&inner);
         let owned = OwnedTasks::new(Arc::clone(&inner));
         Self {
-            actor,
-            actor_ref,
-            state,
+            access: ActorAccess::new(actor_ref, actor, state),
             inbox,
             inner,
             owned,
@@ -60,9 +56,7 @@ impl<A: Actor> ActorTurnFixture<A> {
 
     async fn next(&mut self, expected_mode: Mode) -> SchedulerTurn {
         actor_turn(
-            &mut self.actor,
-            &self.actor_ref,
-            &mut self.state,
+            &mut self.access,
             &mut self.inbox,
             &self.inner,
             &self.owned,
@@ -76,9 +70,7 @@ impl<A: Actor> ActorTurnFixture<A> {
     /// Polls once for parking and wake assertions.
     fn poll_once(&mut self, expected_mode: Mode, task: &mut Context<'_>) -> Poll<SchedulerTurn> {
         let turn = actor_turn(
-            &mut self.actor,
-            &self.actor_ref,
-            &mut self.state,
+            &mut self.access,
             &mut self.inbox,
             &self.inner,
             &self.owned,
@@ -166,15 +158,10 @@ struct ReadyExclusiveDrop {
     dropped_while_unwinding: Arc<AtomicBool>,
 }
 
-impl crate::ActorFuture<TestActor> for ReadyExclusiveDrop {
+impl Future for ReadyExclusiveDrop {
     type Output = ();
 
-    fn poll(
-        self: std::pin::Pin<&mut Self>,
-        _actor: &mut TestActor,
-        _scope: &mut ActorScope<'_, TestActor>,
-        _task: &mut Context<'_>,
-    ) -> Poll<()> {
+    fn poll(self: std::pin::Pin<&mut Self>, _task: &mut Context<'_>) -> Poll<()> {
         Poll::Ready(())
     }
 }
@@ -200,10 +187,12 @@ impl Envelope<TestActor> for BatchBoundaryEnvelope {
         self.dispatched.fetch_add(1, Ordering::SeqCst);
         match self.boundary {
             BatchBoundary::Exclusive => {
-                scheduler.__push_exclusive(Seal, std::future::pending::<()>().into_actor());
+                let (future, lease) = ScheduledFuture::test_scoped(std::future::pending::<()>());
+                scheduler.__push_interleaved(Seal, future);
+                lease.acquire_for_test();
             }
             BatchBoundary::Interleaved => {
-                scheduler.__push_interleaved(Seal, async {}.into_actor());
+                scheduler.__push_interleaved(Seal, ScheduledFuture::test(async {}));
             }
         }
     }
@@ -224,19 +213,21 @@ async fn ordinary_cursor_visits_each_actor_source_between_mailbox_batches() {
         fixture.enqueue(CountEnvelope(Arc::clone(&mailbox_dispatches)));
     }
 
-    fixture.state.children.publish(ChildExit::new(
+    fixture.access.state().children.publish(ChildExit::new(
         ChildId::invalid_for_test(),
         ExitStatus::new(ExitReason::Stopped, SubtreeStatus::Terminated),
     ));
 
     let interleaved_completed = Arc::new(AtomicBool::new(false));
-    fixture.scheduler.__push_interleaved(Seal, {
-        let completed = Arc::clone(&interleaved_completed);
-        async move {
-            completed.store(true, Ordering::SeqCst);
-        }
-        .into_actor()
-    });
+    fixture.scheduler.__push_interleaved(
+        Seal,
+        ScheduledFuture::test({
+            let completed = Arc::clone(&interleaved_completed);
+            async move {
+                completed.store(true, Ordering::SeqCst);
+            }
+        }),
+    );
     assert!(matches!(
         fixture.next(Mode::Running).await,
         SchedulerTurn::Progress
@@ -287,21 +278,20 @@ fn mailbox_batch_stops_after_dispatch_changes_lifecycle() {
 }
 
 #[tokio::test]
-async fn completed_exclusive_drop_panic_is_contained_after_removal() {
+async fn completed_leased_drop_panic_is_contained_after_removal() {
     let mut fixture = ActorTurnFixture::new(1, NonZeroUsize::MIN);
     let drops = Arc::new(AtomicUsize::new(0));
     let dropped_while_unwinding = Arc::new(AtomicBool::new(false));
-    fixture.scheduler.__push_exclusive(
-        Seal,
-        ReadyExclusiveDrop {
-            drops: Arc::clone(&drops),
-            dropped_while_unwinding: Arc::clone(&dropped_while_unwinding),
-        },
-    );
+    let (future, lease) = ScheduledFuture::test_scoped(ReadyExclusiveDrop {
+        drops: Arc::clone(&drops),
+        dropped_while_unwinding: Arc::clone(&dropped_while_unwinding),
+    });
+    fixture.scheduler.__push_interleaved(Seal, future);
+    lease.acquire_for_test();
 
     assert!(matches!(
         fixture.next(Mode::Running).await,
-        SchedulerTurn::LifecycleHint
+        SchedulerTurn::Progress
     ));
     assert!(RuntimeScheduler::is_idle(&mut fixture.scheduler));
     assert_eq!(drops.load(Ordering::SeqCst), 1);
@@ -319,8 +309,8 @@ async fn drain_rotates_then_uses_the_configured_mailbox_budget() {
         ActorTurnFixture::new(mailbox_dispatch_budget + 2, NonZeroUsize::new(2).unwrap());
     fixture
         .scheduler
-        .__push_interleaved(Seal, async {}.into_actor());
-    fixture.state.children.publish(ChildExit::new(
+        .__push_interleaved(Seal, ScheduledFuture::test(async {}));
+    fixture.access.state().children.publish(ChildExit::new(
         ChildId::invalid_for_test(),
         ExitStatus::new(ExitReason::Stopped, SubtreeStatus::Terminated),
     ));
@@ -366,7 +356,7 @@ async fn serial_drain_inherits_cursor_before_resuming_mailbox() {
     let mailbox_dispatch_budget = <SerialActor as MessageConfig>::MAILBOX_DISPATCH_BUDGET.get();
     let dispatched = Arc::new(AtomicUsize::new(0));
     let mut fixture = ActorTurnFixture::<SerialActor>::new_serial(mailbox_dispatch_budget + 2);
-    fixture.state.children.publish(ChildExit::new(
+    fixture.access.state().children.publish(ChildExit::new(
         ChildId::invalid_for_test(),
         ExitStatus::new(ExitReason::Stopped, SubtreeStatus::Terminated),
     ));

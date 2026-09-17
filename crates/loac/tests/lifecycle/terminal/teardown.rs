@@ -7,8 +7,8 @@ use std::{
 };
 
 use loac::{
-    Actor, ActorFuture, ActorScope, CallError, DispatchHandler, ExitReason, InterleavedFutureExt,
-    Message, ReplyExt, SubtreeStatus, actor,
+    Actor, ActorScope, CallError, Cx, DispatchHandler, ExitReason, Handler, InterleavedFutureExt,
+    Message, ReplyExt, StreamHandler, StreamOut, SubtreeStatus, Writer, actor,
 };
 use tokio::sync::oneshot;
 
@@ -46,7 +46,7 @@ impl DispatchHandler<QueuedDrop> for PendingInit {
         &mut self,
         _message: QueuedDrop,
         _scope: &mut ActorScope<'_, Self>,
-    ) -> impl loac::IntoReply<Self, QueuedDrop> + use<> {
+    ) -> impl loac::IntoReply<Self, QueuedDrop> {
         unreachable!("pending initialization prevents dispatch");
         #[allow(unreachable_code)]
         ().ready()
@@ -135,15 +135,10 @@ struct PendingInterleavedDrop {
     dropped_while_unwinding: Arc<AtomicBool>,
 }
 
-impl ActorFuture<PendingInterleavedActor> for PendingInterleavedDrop {
+impl std::future::Future for PendingInterleavedDrop {
     type Output = ();
 
-    fn poll(
-        mut self: std::pin::Pin<&mut Self>,
-        _actor: &mut PendingInterleavedActor,
-        _scope: &mut ActorScope<'_, PendingInterleavedActor>,
-        _task: &mut Context<'_>,
-    ) -> Poll<()> {
+    fn poll(mut self: std::pin::Pin<&mut Self>, _task: &mut Context<'_>) -> Poll<()> {
         if let Some(entered) = self.entered.take() {
             let _ = entered.send(());
         }
@@ -165,7 +160,7 @@ impl DispatchHandler<PendingInterleavedDrop> for PendingInterleavedActor {
         &mut self,
         message: PendingInterleavedDrop,
         _scope: &mut ActorScope<'_, Self>,
-    ) -> impl loac::IntoReply<Self, PendingInterleavedDrop> + use<> {
+    ) -> impl loac::IntoReply<Self, PendingInterleavedDrop> {
         message.interleaved()
     }
 }
@@ -222,4 +217,191 @@ fn executor_teardown_contains_each_interleaved_drop_panic() {
     assert_eq!(status.reason(), ExitReason::Aborted);
     assert_eq!(status.subtree(), SubtreeStatus::Unconfirmed);
     drop(owner);
+}
+
+struct CxDropActor {
+    order: Arc<AtomicUsize>,
+    touched: bool,
+}
+
+impl Drop for CxDropActor {
+    fn drop(&mut self) {
+        let value = if self.touched { 2 } else { usize::MAX };
+        self.order.store(value, Ordering::SeqCst);
+    }
+}
+
+#[actor(mailbox, interleaved)]
+impl Actor for CxDropActor {
+    type SpawnArgs = Arc<AtomicUsize>;
+
+    async fn init(order: Self::SpawnArgs, _scope: &mut ActorScope<'_, Self>) -> Self {
+        Self {
+            order,
+            touched: false,
+        }
+    }
+}
+
+#[derive(Message)]
+#[message(reply = ())]
+struct PendingCxDrop(oneshot::Sender<()>);
+
+struct CxDropFuture<'a> {
+    cx: Cx<'a, CxDropActor>,
+    entered: Option<oneshot::Sender<()>>,
+}
+
+impl std::future::Future for CxDropFuture<'_> {
+    type Output = ();
+
+    fn poll(mut self: std::pin::Pin<&mut Self>, _task: &mut Context<'_>) -> Poll<()> {
+        if let Some(entered) = self.entered.take() {
+            let _ = entered.send(());
+        }
+        Poll::Pending
+    }
+}
+
+impl Drop for CxDropFuture<'_> {
+    fn drop(&mut self) {
+        self.cx.with(|actor, _scope| {
+            actor.touched = true;
+            actor.order.store(1, Ordering::SeqCst);
+        });
+    }
+}
+
+impl Handler<PendingCxDrop> for CxDropActor {
+    fn handle<'a>(
+        message: PendingCxDrop,
+        cx: Cx<'a, Self>,
+    ) -> impl std::future::Future<Output = ()> + Send + 'a {
+        CxDropFuture {
+            cx,
+            entered: Some(message.0),
+        }
+    }
+}
+
+#[test]
+fn executor_teardown_drops_cx_futures_before_actor_storage() {
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .build()
+        .unwrap();
+    let order = Arc::new(AtomicUsize::new(0));
+    let (entered_tx, entered_rx) = oneshot::channel();
+
+    let (owner, response) = runtime.block_on(async {
+        let owner = loac::spawn::<CxDropActor>(Arc::clone(&order));
+        let response = owner.try_call(PendingCxDrop(entered_tx)).unwrap();
+        entered_rx.await.unwrap();
+        (owner, response)
+    });
+
+    drop(runtime);
+
+    assert_eq!(order.load(Ordering::SeqCst), 2);
+    drop((owner, response));
+}
+
+struct CxStreamDropActor {
+    order: Arc<AtomicUsize>,
+    touched: bool,
+}
+
+impl Drop for CxStreamDropActor {
+    fn drop(&mut self) {
+        let value = if self.touched { 2 } else { usize::MAX };
+        self.order.store(value, Ordering::SeqCst);
+    }
+}
+
+#[actor(mailbox, interleaved)]
+impl Actor for CxStreamDropActor {
+    type SpawnArgs = Arc<AtomicUsize>;
+
+    async fn init(order: Self::SpawnArgs, _scope: &mut ActorScope<'_, Self>) -> Self {
+        Self {
+            order,
+            touched: false,
+        }
+    }
+}
+
+#[derive(Message)]
+#[message(stream = u8, reply = ())]
+struct PendingCxStreamDrop(oneshot::Sender<()>);
+
+struct CxStreamDropState<'a, W> {
+    cx: Cx<'a, CxStreamDropActor>,
+    _out: StreamOut<'a, W>,
+}
+
+impl<W> Drop for CxStreamDropState<'_, W> {
+    fn drop(&mut self) {
+        self.cx.with(|actor, _scope| {
+            actor.touched = true;
+            actor.order.store(1, Ordering::SeqCst);
+        });
+    }
+}
+
+impl StreamHandler<PendingCxStreamDrop> for CxStreamDropActor {
+    async fn handle<'a, W>(message: PendingCxStreamDrop, out: StreamOut<'a, W>, cx: Cx<'a, Self>)
+    where
+        W: Writer<u8> + Send + 'a,
+    {
+        let _state = CxStreamDropState { cx, _out: out };
+        let _ = message.0.send(());
+        std::future::pending().await
+    }
+}
+
+#[test]
+fn executor_teardown_drops_default_stream_before_actor_storage() {
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .build()
+        .unwrap();
+    let order = Arc::new(AtomicUsize::new(0));
+    let (entered_tx, entered_rx) = oneshot::channel();
+
+    let (owner, response) = runtime.block_on(async {
+        let owner = loac::spawn::<CxStreamDropActor>(Arc::clone(&order));
+        let response = owner.try_call(PendingCxStreamDrop(entered_tx)).unwrap();
+        entered_rx.await.unwrap();
+        (owner, response)
+    });
+
+    drop(runtime);
+
+    assert_eq!(order.load(Ordering::SeqCst), 2);
+    drop((owner, response));
+}
+
+#[test]
+fn executor_teardown_drops_call_to_stream_before_actor_storage() {
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .build()
+        .unwrap();
+    let order = Arc::new(AtomicUsize::new(0));
+    let (entered_tx, entered_rx) = oneshot::channel();
+
+    let (owner, response) = runtime.block_on(async {
+        let owner = loac::spawn::<CxStreamDropActor>(Arc::clone(&order));
+        let actor = owner.actor_ref();
+        let (item_tx, _item_rx) = tokio::sync::mpsc::channel(1);
+        let response = tokio::spawn(async move {
+            actor
+                .call_to(PendingCxStreamDrop(entered_tx), item_tx)
+                .await
+        });
+        entered_rx.await.unwrap();
+        (owner, response)
+    });
+
+    drop(runtime);
+
+    assert_eq!(order.load(Ordering::SeqCst), 2);
+    drop((owner, response));
 }

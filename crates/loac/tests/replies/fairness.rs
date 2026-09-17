@@ -22,7 +22,7 @@ impl DispatchHandler<OwnedTaskIdentity> for FairActor {
         &mut self,
         _message: OwnedTaskIdentity,
         _scope: &mut ActorScope<Self>,
-    ) -> impl loac::IntoReply<Self, OwnedTaskIdentity> + use<> {
+    ) -> impl loac::IntoReply<Self, OwnedTaskIdentity> {
         let actor_task = tokio::task::id();
         async move { tokio::task::id() != actor_task }
     }
@@ -36,22 +36,15 @@ struct ActiveInterleavedReply {
     completed_at: Arc<AtomicUsize>,
 }
 
-impl DispatchHandler<ActiveInterleavedReply> for FairActor {
-    fn handle(
-        &mut self,
-        message: ActiveInterleavedReply,
-        _scope: &mut ActorScope<Self>,
-    ) -> impl loac::IntoReply<Self, ActiveInterleavedReply> + use<> {
-        async move {
-            let _ = message.entered.send(());
-            let _ = message.release.await;
-            message.completed_at
-        }
-        .into_actor()
-        .map(|completed_at, actor: &mut Self, _scope| {
-            completed_at.store(actor.handled.load(Ordering::SeqCst), Ordering::SeqCst);
-        })
-        .interleaved()
+impl Handler<ActiveInterleavedReply> for FairActor {
+    async fn handle(message: ActiveInterleavedReply, mut cx: Cx<'_, Self>) {
+        let _ = message.entered.send(());
+        let _ = message.release.await;
+        cx.with(|actor, _| {
+            message
+                .completed_at
+                .store(actor.handled.load(Ordering::SeqCst), Ordering::SeqCst);
+        });
     }
 }
 
@@ -64,7 +57,7 @@ impl DispatchHandler<ReadyWork> for FairActor {
         &mut self,
         _message: ReadyWork,
         _scope: &mut ActorScope<Self>,
-    ) -> impl loac::IntoReply<Self, ReadyWork> + use<> {
+    ) -> impl loac::IntoReply<Self, ReadyWork> {
         self.handled.fetch_add(1, Ordering::SeqCst);
         ().ready()
     }
@@ -133,7 +126,7 @@ struct FairChildExitActor {
     hook_completed: Option<oneshot::Sender<()>>,
 }
 
-#[actor(mailbox = 64, children = unbounded)]
+#[actor(mailbox = 64, interleaved, children = unbounded)]
 impl Actor for FairChildExitActor {
     type SpawnArgs = FairChildExitArgs;
 
@@ -162,7 +155,7 @@ impl DispatchHandler<PendingOwned> for FairChildExitActor {
         &mut self,
         message: PendingOwned,
         _scope: &mut ActorScope<Self>,
-    ) -> impl loac::IntoReply<Self, PendingOwned> + use<> {
+    ) -> impl loac::IntoReply<Self, PendingOwned> {
         async move {
             let _ = message.entered.send(());
             let _ = message.release.await;
@@ -170,18 +163,11 @@ impl DispatchHandler<PendingOwned> for FairChildExitActor {
     }
 }
 
-impl DispatchHandler<ExclusiveGate> for FairChildExitActor {
-    fn handle(
-        &mut self,
-        message: ExclusiveGate,
-        _scope: &mut ActorScope<Self>,
-    ) -> impl loac::IntoReply<Self, ExclusiveGate> + use<> {
-        async move {
-            let _ = message.entered.send(());
-            let _ = message.release.await;
-        }
-        .into_actor()
-        .exclusive()
+impl Handler<ExclusiveGate> for FairChildExitActor {
+    async fn handle(message: ExclusiveGate, mut cx: Cx<'_, Self>) {
+        let _guard = cx.exclusive();
+        let _ = message.entered.send(());
+        let _ = message.release.await;
     }
 }
 
@@ -190,7 +176,7 @@ impl DispatchHandler<ReadyWork> for FairChildExitActor {
         &mut self,
         _message: ReadyWork,
         _scope: &mut ActorScope<Self>,
-    ) -> impl loac::IntoReply<Self, ReadyWork> + use<> {
+    ) -> impl loac::IntoReply<Self, ReadyWork> {
         self.handled.fetch_add(1, Ordering::SeqCst);
         ().ready()
     }

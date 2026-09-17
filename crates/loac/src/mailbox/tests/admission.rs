@@ -104,7 +104,7 @@ impl DispatchHandler<RecoverMessage> for TestActor {
         &mut self,
         _message: RecoverMessage,
         _scope: &mut ActorScope<Self>,
-    ) -> impl crate::IntoReply<Self, RecoverMessage> + use<> {
+    ) -> impl crate::IntoReply<Self, RecoverMessage> {
         ().ready()
     }
 }
@@ -292,7 +292,7 @@ impl DispatchHandler<PanicDropMessage> for TestActor {
         &mut self,
         _message: PanicDropMessage,
         _scope: &mut ActorScope<Self>,
-    ) -> impl crate::IntoReply<Self, PanicDropMessage> + use<> {
+    ) -> impl crate::IntoReply<Self, PanicDropMessage> {
         ().ready()
     }
 }

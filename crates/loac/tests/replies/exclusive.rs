@@ -32,7 +32,7 @@ impl DispatchHandler<PendingOwned> for ExclusiveActor {
         &mut self,
         message: PendingOwned,
         _scope: &mut ActorScope<Self>,
-    ) -> impl loac::IntoReply<Self, PendingOwned> + use<> {
+    ) -> impl loac::IntoReply<Self, PendingOwned> {
         async move {
             let _ = message.entered.send(());
             let _ = message.release.await;
@@ -52,26 +52,17 @@ impl DispatchHandler<InterleavedGate> for ExclusiveActor {
         &mut self,
         message: InterleavedGate,
         _scope: &mut ActorScope<Self>,
-    ) -> impl loac::IntoReply<Self, InterleavedGate> + use<> {
+    ) -> impl loac::IntoReply<Self, InterleavedGate> {
         let _ = message.dispatched.send(());
-        async move { drop(message.release.await) }
-            .into_actor()
-            .interleaved()
+        async move { drop(message.release.await) }.interleaved()
     }
 }
 
-impl DispatchHandler<ExclusiveGate> for ExclusiveActor {
-    fn handle(
-        &mut self,
-        message: ExclusiveGate,
-        _scope: &mut ActorScope<Self>,
-    ) -> impl loac::IntoReply<Self, ExclusiveGate> + use<> {
-        async move {
-            let _ = message.entered.send(());
-            let _ = message.release.await;
-        }
-        .into_actor()
-        .exclusive()
+impl Handler<ExclusiveGate> for ExclusiveActor {
+    async fn handle(message: ExclusiveGate, mut cx: Cx<'_, Self>) {
+        let _guard = cx.exclusive();
+        let _ = message.entered.send(());
+        let _ = message.release.await;
     }
 }
 
@@ -84,7 +75,7 @@ impl DispatchHandler<Mark> for ExclusiveActor {
         &mut self,
         message: Mark,
         _scope: &mut ActorScope<Self>,
-    ) -> impl loac::IntoReply<Self, Mark> + use<> {
+    ) -> impl loac::IntoReply<Self, Mark> {
         let _ = message.0.send(());
         ().ready()
     }
@@ -153,6 +144,90 @@ async fn exclusive_blocks_actor_work_but_owned_continues() {
     watchdog(marked_rx).await.unwrap();
     watchdog(child_hooks_rx.recv()).await.unwrap();
 
+    assert_eq!(
+        watchdog(owner.shutdown(Shutdown::Stop)).await.reason(),
+        ExitReason::Stopped
+    );
+}
+
+struct ScopedLeaseActor;
+
+#[actor(mailbox = 4, interleaved = 2)]
+impl Actor for ScopedLeaseActor {
+    type SpawnArgs = ();
+
+    async fn init(_args: (), _scope: &mut ActorScope<'_, Self>) -> Self {
+        Self
+    }
+}
+
+#[derive(Message)]
+#[message(reply = ())]
+struct ScopedLease {
+    entered: oneshot::Sender<()>,
+    release: oneshot::Receiver<()>,
+    released: oneshot::Sender<()>,
+    finish: oneshot::Receiver<()>,
+}
+
+impl Handler<ScopedLease> for ScopedLeaseActor {
+    async fn handle(message: ScopedLease, mut cx: Cx<'_, Self>) {
+        let guard = cx.exclusive();
+        let _ = message.entered.send(());
+        let _ = message.release.await;
+        drop(guard);
+        let _ = message.released.send(());
+        let _ = message.finish.await;
+    }
+}
+
+#[derive(Message)]
+#[message(reply = ())]
+struct LeaseMark(oneshot::Sender<()>);
+
+impl DispatchHandler<LeaseMark> for ScopedLeaseActor {
+    fn handle(
+        &mut self,
+        message: LeaseMark,
+        _scope: &mut ActorScope<Self>,
+    ) -> impl loac::IntoReply<Self, LeaseMark> {
+        let _ = message.0.send(());
+        ().ready()
+    }
+}
+
+#[tokio::test]
+async fn dropping_the_guard_resumes_actor_work_before_reply_completion() {
+    let owner = loac::spawn::<ScopedLeaseActor>(());
+    let actor = owner.actor_ref();
+    let (entered_tx, entered_rx) = oneshot::channel();
+    let (release_tx, release_rx) = oneshot::channel();
+    let (released_tx, released_rx) = oneshot::channel();
+    let (finish_tx, finish_rx) = oneshot::channel();
+    let mut leased = Box::pin(
+        actor
+            .try_call(ScopedLease {
+                entered: entered_tx,
+                release: release_rx,
+                released: released_tx,
+                finish: finish_rx,
+            })
+            .unwrap(),
+    );
+    watchdog(entered_rx).await.unwrap();
+
+    let (marked_tx, marked_rx) = oneshot::channel();
+    let mut marked = Box::pin(actor.try_call(LeaseMark(marked_tx)).unwrap());
+    assert!(poll_once(marked.as_mut()).await.is_pending());
+
+    release_tx.send(()).unwrap();
+    watchdog(released_rx).await.unwrap();
+    assert_eq!(watchdog(marked.as_mut()).await, Ok(()));
+    watchdog(marked_rx).await.unwrap();
+    assert!(poll_once(leased.as_mut()).await.is_pending());
+
+    finish_tx.send(()).unwrap();
+    assert_eq!(watchdog(leased).await, Ok(()));
     assert_eq!(
         watchdog(owner.shutdown(Shutdown::Stop)).await.reason(),
         ExitReason::Stopped

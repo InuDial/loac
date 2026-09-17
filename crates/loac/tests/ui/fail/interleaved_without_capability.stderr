@@ -1,24 +1,18 @@
-error[E0599]: the method `interleaved` exists for struct `Pending`, but its trait bounds were not satisfied
-  --> tests/ui/fail/interleaved_without_capability.rs:44:17
+error[E0277]: the trait bound `Interleaved<_, Pending>: loac::IntoReply<Serial, Ping>` is not satisfied
+  --> tests/ui/fail/interleaved_without_capability.rs:41:10
    |
-23 | struct Pending;
-   | -------------- method `interleaved` not found for this struct because it doesn't satisfy `Pending: loac::InterleavedFutureExt<Serial>`
-...
-44 |         Pending.interleaved()
-   |                 ^^^^^^^^^^^ method cannot be called on `Pending` due to unsatisfied trait bounds
+41 |     ) -> impl IntoReply<Self, Ping> {
+   |          ^^^^^^^^^^^^^^^^^^^^^^^^^^ the trait `reply::sealed::HandleReply<Serial, Ping>` is not implemented for `Interleaved<_, Pending>`
+42 |         Pending.interleaved()
+   |         --------------------- return type was inferred to be `Interleaved<_, Pending>` here
    |
-  ::: src/scheduling/profile.rs
+help: the trait `reply::sealed::HandleReply<A, M>` is implemented for `Interleaved<A, F>`
+  --> src/reply.rs
    |
-   | pub struct Serial<A: Actor> {
-   | --------------------------- doesn't satisfy `_: InterleavedScheduler<Serial>`
-   |
-   = note: the following trait bounds were not satisfied:
-           `loac::scheduling::Serial<Serial>: InterleavedScheduler<Serial>`
-           which is required by `Pending: loac::InterleavedFutureExt<Serial>`
-           `&Pending: ActorFuture<_>`
-           which is required by `&Pending: loac::InterleavedFutureExt<_>`
-           `&mut Pending: ActorFuture<_>`
-           which is required by `&mut Pending: loac::InterleavedFutureExt<_>`
-   = help: items from traits can only be used if the trait is implemented and in scope
-   = note: the following trait defines an item `interleaved`, perhaps you need to implement it:
-           candidate #1: `loac::InterleavedFutureExt`
+   | /     impl<A, M, F> HandleReply<A, M> for Interleaved<A, F>
+   | |     where
+   | |         A: HasInterleaving,
+   | |         M: Message,
+   | |         F: Future<Output = M::Reply> + Send + 'static,
+   | |______________________________________________________^
+   = note: required for `Interleaved<_, Pending>` to implement `loac::IntoReply<Serial, Ping>`

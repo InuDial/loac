@@ -1,3 +1,5 @@
+use std::future::Future;
+
 use loac::{Actor, ActorScope, Cx, ExitReason, Handler, Message, Shutdown, actor};
 use tokio::sync::oneshot;
 
@@ -51,11 +53,31 @@ impl Handler<OpenScope> for Worker {
     }
 }
 
+#[derive(Message)]
+#[message(reply = ())]
+struct EagerAccess;
+
+impl Handler<EagerAccess> for Worker {
+    fn handle<'a>(
+        _message: EagerAccess,
+        mut cx: Cx<'a, Self>,
+    ) -> impl Future<Output = ()> + Send + 'a {
+        cx.with(|_actor, scope| {
+            assert!(scope.myself().exit_status().is_none());
+        });
+        std::future::ready(())
+    }
+}
+
 #[tokio::test]
 async fn cx_exposes_the_actor_ref() {
     let owner = loac::spawn::<Worker>(());
 
     owner.call(Ping).await.expect("ping should be handled");
+    owner
+        .call(EagerAccess)
+        .await
+        .expect("eager access should be deferred safely");
 
     let exit = owner.shutdown(Shutdown::Stop).await;
     assert_eq!(exit.reason(), ExitReason::Stopped);

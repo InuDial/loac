@@ -1,9 +1,7 @@
 use super::*;
 
 pub(crate) async fn stop_actor<A: Actor>(
-    actor: &mut A,
-    actor_ref: &ActorRef<A>,
-    state: &mut ScopeState<A>,
+    access: &mut ActorAccess<A>,
     inbox: &mut ActorInbox<A>,
     control: &Control,
     owned: &OwnedTasks<A>,
@@ -12,8 +10,8 @@ pub(crate) async fn stop_actor<A: Actor>(
     match close_and_discard(inbox, control, Mode::Stopping).await {
         DiscardOutcome::Complete => {}
         DiscardOutcome::ModeChanged => match control.mode() {
-            Mode::Killing => return kill_actor(state, inbox, control, owned, scheduler).await,
-            Mode::Failing => return fail_actor(state, inbox, control, owned, scheduler).await,
+            Mode::Killing => return kill_actor(access, inbox, control, owned, scheduler).await,
+            Mode::Failing => return fail_actor(access, inbox, control, owned, scheduler).await,
             // Lifecycle cannot return to a graceful mode. Aborting and Exited
             // belong to ActorTask's outer drop/publication path, which cannot
             // repoll this inner future after committing either state.
@@ -21,36 +19,28 @@ pub(crate) async fn stop_actor<A: Actor>(
         },
     }
     owned.close();
-    match finish_replies(actor, actor_ref, state, control, owned, scheduler).await {
+    match finish_replies(control, owned, scheduler).await {
         Work::Complete(()) => {}
-        Work::Killed => return kill_actor(state, inbox, control, owned, scheduler).await,
+        Work::Killed => return kill_actor(access, inbox, control, owned, scheduler).await,
         Work::Panicked | Work::DropPanicked(()) => {
-            return fail_actor(state, inbox, control, owned, scheduler).await;
+            return fail_actor(access, inbox, control, owned, scheduler).await;
         }
     }
 
-    match graceful_finish(
-        actor,
-        actor_ref,
-        state,
-        control,
-        Shutdown::Stop,
-        ExitReason::Stopped,
-    )
-    .await
-    {
-        Work::Complete(()) => state.children().terminal_status(ExitReason::Stopped),
-        Work::Killed => kill_actor(state, inbox, control, owned, scheduler).await,
+    match graceful_finish(access, control, Shutdown::Stop, ExitReason::Stopped).await {
+        Work::Complete(()) => access
+            .state()
+            .children()
+            .terminal_status(ExitReason::Stopped),
+        Work::Killed => kill_actor(access, inbox, control, owned, scheduler).await,
         Work::Panicked | Work::DropPanicked(()) => {
-            fail_actor(state, inbox, control, owned, scheduler).await
+            fail_actor(access, inbox, control, owned, scheduler).await
         }
     }
 }
 
 pub(crate) async fn drain_actor<A: Actor>(
-    actor: &mut A,
-    actor_ref: &ActorRef<A>,
-    state: &mut ScopeState<A>,
+    access: &mut ActorAccess<A>,
     inbox: &mut ActorInbox<A>,
     inner: &Arc<ActorInner<A>>,
     owned: &OwnedTasks<A>,
@@ -68,10 +58,10 @@ pub(crate) async fn drain_actor<A: Actor>(
     loop {
         match control.mode() {
             Mode::Killing => {
-                return kill_actor(state, inbox, control, owned, scheduler).await;
+                return kill_actor(access, inbox, control, owned, scheduler).await;
             }
             Mode::Failing => {
-                return fail_actor(state, inbox, control, owned, scheduler).await;
+                return fail_actor(access, inbox, control, owned, scheduler).await;
             }
             Mode::Running | Mode::Draining | Mode::Stopping => {}
             Mode::Exited(status) => return status,
@@ -86,9 +76,7 @@ pub(crate) async fn drain_actor<A: Actor>(
         }
 
         let turn = AssertUnwindSafe(drain_turn(
-            actor,
-            actor_ref,
-            state,
+            access,
             inbox,
             inner,
             owned,
@@ -102,7 +90,7 @@ pub(crate) async fn drain_actor<A: Actor>(
             Ok(turn) => turn,
             Err(payload) => {
                 control.contain_panic(payload);
-                return fail_actor(state, inbox, control, owned, scheduler).await;
+                return fail_actor(access, inbox, control, owned, scheduler).await;
             }
         };
 
@@ -110,14 +98,14 @@ pub(crate) async fn drain_actor<A: Actor>(
             DrainTurn::RepliesFinished => break,
             DrainTurn::Scheduled(SchedulerTurn::LifecycleHint | SchedulerTurn::Progress) => {}
             DrainTurn::Scheduled(SchedulerTurn::Child(event)) => {
-                match handle_child_exit(actor, actor_ref, state, event, control).await {
+                match handle_child_exit(access, event, control).await {
                     Work::Complete(()) => {}
                     Work::Killed => {
-                        return kill_actor(state, inbox, control, owned, scheduler).await;
+                        return kill_actor(access, inbox, control, owned, scheduler).await;
                     }
                     Work::Panicked | Work::DropPanicked(()) => {
                         control.begin_failure();
-                        return fail_actor(state, inbox, control, owned, scheduler).await;
+                        return fail_actor(access, inbox, control, owned, scheduler).await;
                     }
                 }
             }
@@ -128,28 +116,19 @@ pub(crate) async fn drain_actor<A: Actor>(
         }
     }
 
-    match graceful_finish(
-        actor,
-        actor_ref,
-        state,
-        control,
-        Shutdown::Drain,
-        ExitReason::Drained,
-    )
-    .await
-    {
-        Work::Complete(()) => state.children().terminal_status(ExitReason::Drained),
-        Work::Killed => kill_actor(state, inbox, control, owned, scheduler).await,
+    match graceful_finish(access, control, Shutdown::Drain, ExitReason::Drained).await {
+        Work::Complete(()) => access
+            .state()
+            .children()
+            .terminal_status(ExitReason::Drained),
+        Work::Killed => kill_actor(access, inbox, control, owned, scheduler).await,
         Work::Panicked | Work::DropPanicked(()) => {
-            fail_actor(state, inbox, control, owned, scheduler).await
+            fail_actor(access, inbox, control, owned, scheduler).await
         }
     }
 }
 
 async fn finish_replies<A: Actor>(
-    actor: &mut A,
-    actor_ref: &ActorRef<A>,
-    state: &mut ScopeState<A>,
     control: &Control,
     owned: &OwnedTasks<A>,
     scheduler: &mut ActorScheduler<A>,
@@ -167,11 +146,8 @@ async fn finish_replies<A: Actor>(
                 biased;
                 () = control.actor_notified() => {}
                 () = std::future::poll_fn(|task| {
-                    let mut scope = state.actor_scope(actor_ref);
                     RuntimeScheduler::poll_actor_replies(
                         scheduler,
-                        actor,
-                        &mut scope,
                         control,
                         Mode::Stopping,
                         task,
@@ -220,9 +196,7 @@ async fn finish_replies<A: Actor>(
 /// Graceful shutdown is post-order: a parent finishes the work retained by the
 /// selected mode, then waits for children, and only then runs its cleanup hook.
 pub(crate) async fn graceful_finish<A: Actor>(
-    actor: &mut A,
-    actor_ref: &ActorRef<A>,
-    state: &mut ScopeState<A>,
+    access: &mut ActorAccess<A>,
     control: &Control,
     shutdown: Shutdown,
     reason: ExitReason,
@@ -231,8 +205,8 @@ pub(crate) async fn graceful_finish<A: Actor>(
     // committed before this poll must win before Stop or Drain reaches children.
     match await_actor_work(
         async {
-            state.children().request_all(shutdown);
-            state.children().wait_all().await;
+            access.state().children().request_all(shutdown);
+            access.state().children().wait_all().await;
         },
         control,
     )
@@ -246,7 +220,7 @@ pub(crate) async fn graceful_finish<A: Actor>(
 
     await_actor_work(
         async {
-            let mut scope = state.stop_scope(actor_ref);
+            let (actor, mut scope) = access.stop_parts();
             actor.on_stop(reason, &mut scope).await;
         },
         control,
@@ -255,7 +229,7 @@ pub(crate) async fn graceful_finish<A: Actor>(
 }
 
 pub(crate) async fn kill_actor<A: Actor>(
-    state: &mut ScopeState<A>,
+    access: &mut ActorAccess<A>,
     inbox: &mut ActorInbox<A>,
     control: &Control,
     owned: &OwnedTasks<A>,
@@ -264,7 +238,7 @@ pub(crate) async fn kill_actor<A: Actor>(
     // Commit subtree cancellation before running arbitrary Drop code from actor
     // work. Children can then begin terminating even if a destructor is slow.
     inbox.close();
-    state.children().request_all(Shutdown::Kill);
+    access.state().children().request_all(Shutdown::Kill);
     owned.close();
     RuntimeScheduler::clear(scheduler, control);
     let mut expected_mode = Mode::Killing;
@@ -275,12 +249,15 @@ pub(crate) async fn kill_actor<A: Actor>(
         }
     }
     owned.wait().await;
-    state.children().wait_all().await;
-    state.children().terminal_status(ExitReason::Killed)
+    access.state().children().wait_all().await;
+    access
+        .state()
+        .children()
+        .terminal_status(ExitReason::Killed)
 }
 
 pub(crate) async fn fail_actor<A: Actor>(
-    state: &mut ScopeState<A>,
+    access: &mut ActorAccess<A>,
     inbox: &mut ActorInbox<A>,
     control: &Control,
     owned: &OwnedTasks<A>,
@@ -294,7 +271,7 @@ pub(crate) async fn fail_actor<A: Actor>(
         Mode::Running | Mode::Draining | Mode::Stopping | Mode::Failing => ExitReason::Panicked,
     };
     inbox.close();
-    state.children().request_all(Shutdown::Kill);
+    access.state().children().request_all(Shutdown::Kill);
     owned.close();
     RuntimeScheduler::clear(scheduler, control);
     let mut expected_mode = control.mode();
@@ -305,8 +282,60 @@ pub(crate) async fn fail_actor<A: Actor>(
         }
     }
     owned.wait().await;
+    access.state().children().wait_all().await;
+    access.state().children().terminal_status(reason)
+}
+
+// Handler dispatch never precedes successful initialization.
+// Both paths therefore own no scheduled user values.
+pub(crate) async fn kill_uninitialized<A: Actor>(
+    state: &mut ScopeState<A>,
+    inbox: &mut ActorInbox<A>,
+    control: &Control,
+    owned: &OwnedTasks<A>,
+) -> ExitStatus {
+    inbox.close();
+    state.children().request_all(Shutdown::Kill);
+    owned.close();
+    close_discarded(inbox, control, Mode::Killing).await;
+    owned.wait().await;
+    state.children().wait_all().await;
+    state.children().terminal_status(ExitReason::Killed)
+}
+
+pub(crate) async fn fail_uninitialized<A: Actor>(
+    state: &mut ScopeState<A>,
+    inbox: &mut ActorInbox<A>,
+    control: &Control,
+    owned: &OwnedTasks<A>,
+) -> ExitStatus {
+    control.begin_failure();
+    let reason = match control.mode() {
+        Mode::Killing => ExitReason::Killed,
+        Mode::Aborting => ExitReason::Aborted,
+        Mode::Exited(status) => return status,
+        Mode::Running | Mode::Draining | Mode::Stopping | Mode::Failing => ExitReason::Panicked,
+    };
+    inbox.close();
+    state.children().request_all(Shutdown::Kill);
+    owned.close();
+    close_discarded(inbox, control, control.mode()).await;
+    owned.wait().await;
     state.children().wait_all().await;
     state.children().terminal_status(reason)
+}
+
+async fn close_discarded<A: Actor>(
+    inbox: &mut ActorInbox<A>,
+    control: &Control,
+    mut expected_mode: Mode,
+) {
+    loop {
+        match close_and_discard(inbox, control, expected_mode).await {
+            DiscardOutcome::Complete => return,
+            DiscardOutcome::ModeChanged => expected_mode = control.mode(),
+        }
+    }
 }
 
 pub(crate) const TEARDOWN_DROP_BUDGET: usize = 16;

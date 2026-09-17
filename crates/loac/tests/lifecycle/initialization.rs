@@ -51,7 +51,7 @@ impl DispatchHandler<Notify> for AdmissionActor {
         &mut self,
         message: Notify,
         _scope: &mut ActorScope<'_, Self>,
-    ) -> impl loac::IntoReply<Self, Notify> + use<> {
+    ) -> impl loac::IntoReply<Self, Notify> {
         self.value += message.0;
         self.handled.fetch_add(1, Ordering::SeqCst);
         ().ready()
@@ -67,7 +67,7 @@ impl DispatchHandler<Read> for AdmissionActor {
         &mut self,
         _message: Read,
         _scope: &mut ActorScope<'_, Self>,
-    ) -> impl loac::IntoReply<Self, Read> + use<> {
+    ) -> impl loac::IntoReply<Self, Read> {
         (self.value, self.handled.load(Ordering::SeqCst)).ready()
     }
 }
@@ -170,7 +170,7 @@ impl DispatchHandler<InitPing> for ControlledInit {
         &mut self,
         _message: InitPing,
         _scope: &mut ActorScope<'_, Self>,
-    ) -> impl loac::IntoReply<Self, InitPing> + use<> {
+    ) -> impl loac::IntoReply<Self, InitPing> {
         self.handled.fetch_add(1, Ordering::SeqCst);
         ().ready()
     }

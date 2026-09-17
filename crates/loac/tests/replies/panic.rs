@@ -11,6 +11,28 @@ impl Actor for PanicActor {
     }
 }
 
+struct CxPanicActor;
+
+#[actor(mailbox, interleaved)]
+impl Actor for CxPanicActor {
+    type SpawnArgs = ();
+
+    async fn init(_args: Self::SpawnArgs, _scope: &mut ActorScope<'_, Self>) -> Self {
+        Self
+    }
+}
+
+#[derive(Message)]
+#[message(reply = ())]
+struct PanicAfterLease;
+
+impl Handler<PanicAfterLease> for CxPanicActor {
+    async fn handle(_message: PanicAfterLease, mut cx: Cx<'_, Self>) {
+        let _guard = cx.exclusive();
+        panic!("intentional panic after lease acquisition");
+    }
+}
+
 #[derive(Message)]
 #[message(reply = ())]
 struct PendingSibling {
@@ -23,7 +45,7 @@ impl DispatchHandler<PendingSibling> for PanicActor {
         &mut self,
         message: PendingSibling,
         _scope: &mut ActorScope<Self>,
-    ) -> impl loac::IntoReply<Self, PendingSibling> + use<> {
+    ) -> impl loac::IntoReply<Self, PendingSibling> {
         async move {
             let _ = message.entered.send(());
             let _ = message.release.await;
@@ -61,7 +83,7 @@ impl DispatchHandler<PanicAfterReady> for PanicActor {
         &mut self,
         message: PanicAfterReady,
         _scope: &mut ActorScope<Self>,
-    ) -> impl loac::IntoReply<Self, PanicAfterReady> + use<> {
+    ) -> impl loac::IntoReply<Self, PanicAfterReady> {
         message
     }
 }
@@ -71,7 +93,7 @@ impl DispatchHandler<PanicReply> for PanicActor {
         &mut self,
         message: PanicReply,
         _scope: &mut ActorScope<Self>,
-    ) -> impl loac::IntoReply<Self, PanicReply> + use<> {
+    ) -> impl loac::IntoReply<Self, PanicReply> {
         async move {
             let _ = message.entered.send(());
             let _ = message.release.await;
@@ -111,6 +133,18 @@ async fn reply_panic_fails_sibling_in_flight_work() {
     );
     assert_eq!(
         watchdog(sibling).await,
+        Err(CallError::DuringDispatch(ExitReason::Panicked))
+    );
+    assert_eq!(watchdog(owner.wait()).await.reason(), ExitReason::Panicked);
+}
+
+#[tokio::test]
+async fn panic_after_lease_acquisition_fails_the_actor() {
+    let mut owner = loac::spawn::<CxPanicActor>(());
+    let actor = owner.actor_ref();
+
+    assert_eq!(
+        watchdog(actor.call(PanicAfterLease)).await,
         Err(CallError::DuringDispatch(ExitReason::Panicked))
     );
     assert_eq!(watchdog(owner.wait()).await.reason(), ExitReason::Panicked);

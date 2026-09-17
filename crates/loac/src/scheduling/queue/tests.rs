@@ -9,7 +9,7 @@ use std::{
 };
 
 use super::*;
-use crate::{Actor, ActorConfig, ActorScope, IntoActorFuture, Shutdown, mailbox::ActorInner};
+use crate::{Actor, ActorConfig, ActorScope, Shutdown, mailbox::ActorInner};
 
 struct TestActor;
 
@@ -181,6 +181,7 @@ fn poll_futures(
         Mode::Running,
         task,
         |future, task| future.as_mut().poll(task),
+        |_| false,
     )
 }
 
@@ -354,15 +355,12 @@ fn clearing_a_sweep_resets_all_state() {
 fn queue_drop_contains_each_future_panic() {
     let drops = Arc::new(AtomicUsize::new(0));
     let dropped_while_unwinding = Arc::new(AtomicBool::new(false));
-    let mut queue = Queue::<TestActor>::new();
+    let mut queue = Queue::new();
     for _ in 0..2 {
-        queue.push(Box::pin(
-            ReadyWithPanickingDrop {
-                drops: Arc::clone(&drops),
-                dropped_while_unwinding: Arc::clone(&dropped_while_unwinding),
-            }
-            .into_actor(),
-        ));
+        queue.push(ScheduledFuture::test(ReadyWithPanickingDrop {
+            drops: Arc::clone(&drops),
+            dropped_while_unwinding: Arc::clone(&dropped_while_unwinding),
+        }));
     }
 
     drop(queue);

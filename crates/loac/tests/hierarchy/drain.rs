@@ -1,7 +1,7 @@
 use std::sync::{Arc, Mutex};
 
 use loac::{
-    Actor, ActorRef, ActorScope, CallError, DispatchHandler, ExitReason, IntoActorFuture, Message,
+    Actor, ActorRef, ActorScope, CallError, Cx, DispatchHandler, ExitReason, Handler, Message,
     ReplyExt, Shutdown, ShutdownStatus, StopScope, actor,
 };
 use tokio::sync::oneshot;
@@ -34,7 +34,7 @@ impl DispatchHandler<Work> for Worker {
         &mut self,
         message: Work,
         _scope: &mut ActorScope<'_, Self>,
-    ) -> impl loac::IntoReply<Self, Work> + use<> {
+    ) -> impl loac::IntoReply<Self, Work> {
         lock(&self.log).push(format!("work-{}", message.0));
         message.0.ready()
     }
@@ -50,7 +50,7 @@ struct DrainParentArgs {
     worker_started: oneshot::Sender<ActorRef<Worker>>,
 }
 
-#[actor(mailbox, children = unbounded)]
+#[actor(mailbox, interleaved, children = unbounded)]
 impl Actor for DrainParent {
     type SpawnArgs = DrainParentArgs;
 
@@ -76,18 +76,11 @@ struct ParentBlock {
     release: oneshot::Receiver<()>,
 }
 
-impl DispatchHandler<ParentBlock> for DrainParent {
-    fn handle(
-        &mut self,
-        message: ParentBlock,
-        _scope: &mut ActorScope<'_, Self>,
-    ) -> impl loac::IntoReply<Self, ParentBlock> + use<> {
-        async move {
-            let _ = message.entered.send(());
-            let _ = message.release.await;
-        }
-        .into_actor()
-        .exclusive()
+impl Handler<ParentBlock> for DrainParent {
+    async fn handle(message: ParentBlock, mut cx: Cx<'_, Self>) {
+        let _guard = cx.exclusive();
+        let _ = message.entered.send(());
+        let _ = message.release.await;
     }
 }
 
@@ -100,7 +93,7 @@ impl DispatchHandler<Forward> for DrainParent {
         &mut self,
         message: Forward,
         _scope: &mut ActorScope<'_, Self>,
-    ) -> impl loac::IntoReply<Self, Forward> + use<> {
+    ) -> impl loac::IntoReply<Self, Forward> {
         let worker = self.worker.clone();
         async move { worker.call(Work(message.0)).await }
     }

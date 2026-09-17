@@ -123,7 +123,7 @@ impl DispatchHandler<PanicTree> for PanicParent {
         &mut self,
         _message: PanicTree,
         _scope: &mut ActorScope<'_, Self>,
-    ) -> impl loac::IntoReply<Self, PanicTree> + use<> {
+    ) -> impl loac::IntoReply<Self, PanicTree> {
         panic!("intentional parent panic");
         #[allow(unreachable_code)]
         ().ready()

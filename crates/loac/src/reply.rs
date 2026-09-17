@@ -8,8 +8,6 @@
 //! Actors without that capability allocate no interleaved reply queue.
 //! Fixed and dynamic configurations bound active interleaved replies.
 //! Unbounded configurations may retain arbitrarily many active replies.
-//! [`ReplyExt::exclusive`] pauses other actor-aware work.
-//! Exclusive scheduling needs no interleaving capability.
 //! [`Handler`](crate::Handler) schedules cx futures on the interleaved lane
 //! automatically.
 //!
@@ -25,14 +23,15 @@
 //! Cancellation takes effect between user polls.
 //! It cannot interrupt synchronous code or user destructors.
 //!
-//! The actor task polls actor-aware replies.
+//! The actor task polls interleaved replies.
 //! Mailbox, interleaved, and child-exit work progress fairly.
 //! Tokio schedules owned future polls independently.
 //! Neither execution path promises poll or completion order.
 //!
 //! Lifecycle changes are checked before scheduled actor work.
 //! Owned tasks check the same authoritative state.
-//! Exclusive work pauses mailbox and actor-aware peers.
+//! An [`ExclusiveGuard`](crate::ExclusiveGuard) pauses scheduled actor work.
+//! Graceful `on_shutdown` hooks may still preempt the lease.
 //! Already-dispatched owned replies remain Tokio-scheduled.
 //!
 //! A panic in handler dispatch or any reply poll fails the actor.
@@ -55,10 +54,11 @@ use pin_project_lite::pin_project;
 use tokio::sync::{mpsc, oneshot};
 
 use crate::{
-    Actor, ActorFuture, ActorScope, CallError, HasInterleaving, HasMailbox, Message,
+    Actor, CallError, HasInterleaving, Message,
+    access::ScopedLease,
     mailbox::DispatchReply,
     owned::OwnedTasks,
-    scheduling::{ActorScheduler, InterleavedScheduler, ReplyScheduler, Seal},
+    scheduling::{ActorScheduler, InterleavedScheduler, ScheduledFuture, Seal},
 };
 
 mod private {
@@ -106,8 +106,6 @@ pub trait ReplyExt: Sized {
     /// Returning it selects owned scheduling.
     /// That spawns a task and adds a cancellation point.
     /// Use `std::future::ready` only when composition needs a future.
-    /// For example, call
-    /// [`IntoActorFuture::into_actor`](crate::IntoActorFuture::into_actor).
     ///
     /// Kill can commit after dispatch begins but before this value is submitted,
     /// including from the handler itself. In that case the caller receives
@@ -116,33 +114,20 @@ pub trait ReplyExt: Sized {
     fn ready(self) -> Ready<Self> {
         Ready { value: self }
     }
-
-    /// Creates an actor-aware reply that reserves actor-aware execution until done.
-    ///
-    /// Its [`ActorFuture`] receives fresh actor and scope borrows each poll.
-    /// It cannot retain those borrows across `Pending`.
-    /// While this reply exists, the runtime pauses mailbox dispatch.
-    /// It also pauses interleaved replies and child-exit hooks.
-    /// Already-dispatched owned futures continue making progress.
-    /// Kill may drop this reply after its current poll.
-    /// This strategy does not require [`HasInterleaving`].
-    fn exclusive(self) -> Exclusive<Self> {
-        Exclusive { future: self }
-    }
 }
 
 impl<T> ReplyExt for T {}
 
 /// Selects interleaved scheduling for a capable actor.
 ///
-/// The [`ActorFuture`] receives temporary actor borrows per poll.
-/// Those borrows end whenever the poll returns.
+/// The ordinary future receives normal task wakeups.
 /// `Pending` allows eligible mailbox and child-exit work.
 /// It also allows other interleaved replies.
-/// An active [`exclusive`](ReplyExt::exclusive) reply pauses these polls.
+/// An active [`ExclusiveGuard`](crate::ExclusiveGuard) pauses these polls.
+/// Graceful `on_shutdown` hooks may still preempt the lease.
 /// Each active reply consumes one configured slot.
 /// Unbounded interleaving may retain arbitrarily many replies.
-pub trait InterleavedFutureExt<A>: ActorFuture<A> + Sized
+pub trait InterleavedFutureExt<A>: Future + Send + Sized + 'static
 where
     A: HasInterleaving,
 {
@@ -158,7 +143,7 @@ where
 impl<A, F> InterleavedFutureExt<A> for F
 where
     A: HasInterleaving,
-    F: ActorFuture<A>,
+    F: Future + Send + 'static,
 {
 }
 
@@ -181,63 +166,39 @@ pub struct Interleaved<A: HasInterleaving, F> {
     future: F,
 }
 
-/// An exclusive actor-aware reply created by [`ReplyExt::exclusive`].
-///
-/// See [`ReplyExt::exclusive`] for the work it pauses and the work that may
-/// continue.
-#[derive(Debug)]
-#[must_use = "a reply must be returned from a handler"]
-pub struct Exclusive<F> {
-    future: F,
-}
-
 /// An interleaved plain-Future reply that may access actor state through the
 /// [`Cx`](crate::Cx) handle captured by the future.
 ///
-/// Created by [`Handler`](crate::Handler) dispatch, or manually through
-/// [`ActorScope::cx_reply`](crate::ActorScope::cx_reply).
+/// Created by [`Handler`](crate::Handler) dispatch.
 #[must_use = "a reply must be returned from a handler"]
-pub struct CxReply<A, R> {
-    pub(crate) future: std::pin::Pin<Box<dyn Future<Output = R> + Send + 'static>>,
-    pub(crate) _actor: PhantomData<fn() -> A>,
+pub(crate) struct CxReply<'a, A: Actor, F: 'a> {
+    future: F,
+    lease: ScopedLease<'a, A>,
 }
 
 /// Streaming interleaved counterpart of [`CxReply`].
 ///
-/// This is the stream-final reply strategy created by
-/// [`StreamHandler`](crate::StreamHandler) dispatch, or manually through
-/// [`ActorScope::cx_stream`](crate::ActorScope::cx_stream). While this future
-/// runs, the actor task polls it on the interleaved lane; the future may access
-/// actor state through the [`Cx`](crate::Cx) handle captured by the future.
+/// [`StreamHandler`](crate::StreamHandler) creates this strategy.
+/// The actor task polls it on the interleaved lane.
+/// Its future accesses actor state through [`Cx`](crate::Cx).
 #[must_use = "a reply must be returned from a handler"]
-pub struct CxStream<A, R> {
-    pub(crate) future: std::pin::Pin<Box<dyn Future<Output = R> + Send + 'static>>,
-    pub(crate) _actor: PhantomData<fn() -> A>,
+pub(crate) struct CxStream<'a, A: Actor, F: 'a> {
+    future: F,
+    lease: ScopedLease<'a, A>,
 }
 
-/// An exclusive plain-Future reply that may access actor state through the
-/// [`Cx`](crate::Cx) handle captured by the future.
-///
-/// Created by [`ActorScope::cx_exclusive`](crate::ActorScope::cx_exclusive).
-/// While this future runs, mailbox dispatch and other actor-aware work pause;
-/// owned tasks may continue.
-#[must_use = "a reply must be returned from a handler"]
-pub struct CxExclusive<A, R> {
-    pub(crate) future: std::pin::Pin<Box<dyn Future<Output = R> + Send + 'static>>,
-    pub(crate) _actor: PhantomData<fn() -> A>,
+impl<'a, A: Actor, F: 'a> CxReply<'a, A, F> {
+    /// Pairs one scoped reply with its actor-liveness witness.
+    pub(crate) fn new(future: F, lease: ScopedLease<'a, A>) -> Self {
+        Self { future, lease }
+    }
 }
 
-/// Streaming exclusive counterpart of [`CxStream`].
-///
-/// This is the stream-final reply strategy created by
-/// [`ActorScope::cx_stream_exclusive`](crate::ActorScope::cx_stream_exclusive).
-/// While this future runs, mailbox dispatch and other actor-aware work pause;
-/// owned tasks may continue. The future may access actor state through the
-/// [`Cx`](crate::Cx) handle captured by the future.
-#[must_use = "a reply must be returned from a handler"]
-pub struct CxStreamExclusive<A, R> {
-    pub(crate) future: std::pin::Pin<Box<dyn Future<Output = R> + Send + 'static>>,
-    pub(crate) _actor: PhantomData<fn() -> A>,
+impl<'a, A: Actor, F: 'a> CxStream<'a, A, F> {
+    /// Pairs one scoped stream with its actor-liveness witness.
+    pub(crate) fn new(future: F, lease: ScopedLease<'a, A>) -> Self {
+        Self { future, lease }
+    }
 }
 
 /// One of two statically known reply strategies.
@@ -296,9 +257,9 @@ where
 /// [`DispatchHandler`](crate::DispatchHandler) implementation.
 ///
 /// This is the streaming counterpart of [`IntoReply`]: a bare [`Future`] with
-/// output `M::Final` selects owned scheduling, [`Ready`] completes the final
-/// value immediately, [`Exclusive`] selects actor-aware mailbox-pausing
-/// scheduling, [`Interleaved`] selects actor-aware interleaved scheduling, and
+/// output `M::Final` selects owned scheduling.
+/// [`Ready`] completes the final value immediately.
+/// [`Interleaved`] selects cooperative interleaved scheduling.
 /// [`Either`] chooses between two strategies at runtime.
 ///
 /// [`Ready`] is mainly useful as one branch of an [`Either`] when the handler
@@ -511,32 +472,6 @@ where
     }
 }
 
-impl<A, F, T> ActorFuture<A> for FinishStream<F, T>
-where
-    A: Actor,
-    F: ActorFuture<A, Output = T>,
-    T: Send + 'static,
-{
-    type Output = ();
-
-    fn poll(
-        self: Pin<&mut Self>,
-        actor: &mut A,
-        scope: &mut ActorScope<'_, A>,
-        cx: &mut Context<'_>,
-    ) -> Poll<Self::Output> {
-        let this = self.project();
-        match this.future.poll(actor, scope, cx) {
-            Poll::Ready(value) => {
-                if let Some(tx) = this.final_tx.take() {
-                    let _ = tx.send(value);
-                }
-                Poll::Ready(())
-            }
-            Poll::Pending => Poll::Pending,
-        }
-    }
-}
 // Crate visibility lets the mailbox invoke the static reply implementation
 // after dynamic envelope dispatch, while downstream crates cannot name it.
 #[expect(
@@ -590,7 +525,7 @@ pub(crate) mod sealed {
     where
         A: HasInterleaving,
         M: Message,
-        F: ActorFuture<A, Output = M::Reply> + Send + 'static,
+        F: Future<Output = M::Reply> + Send + 'static,
     {
         fn handle(
             self,
@@ -598,51 +533,18 @@ pub(crate) mod sealed {
             scheduler: &mut ActorScheduler<A>,
             reply: DispatchReply<'_, A, M::Reply>,
         ) {
-            scheduler.__push_interleaved(Seal, CompleteReply::new(self.future, reply.into_owned()));
-        }
-    }
-
-    impl<A, M, F> HandleReply<A, M> for Exclusive<F>
-    where
-        A: HasMailbox,
-        M: Message,
-        F: ActorFuture<A, Output = M::Reply> + Send + 'static,
-    {
-        fn handle(
-            self,
-            _owned: &OwnedTasks<A>,
-            scheduler: &mut ActorScheduler<A>,
-            reply: DispatchReply<'_, A, M::Reply>,
-        ) {
-            scheduler.__push_exclusive(Seal, CompleteReply::new(self.future, reply.into_owned()));
-        }
-    }
-
-    impl<A, M> HandleReply<A, M> for CxReply<A, M::Reply>
-    where
-        A: HasInterleaving,
-        M: Message,
-        M::Reply: Send + 'static,
-    {
-        fn handle(
-            self,
-            _owned: &OwnedTasks<A>,
-            scheduler: &mut ActorScheduler<A>,
-            reply: DispatchReply<'_, A, M::Reply>,
-        ) {
-            use crate::IntoActorFuture;
             scheduler.__push_interleaved(
                 Seal,
-                CompleteReply::new(self.future.into_actor(), reply.into_owned()),
+                ScheduledFuture::new(CompleteReply::new(self.future, reply.into_owned())),
             );
         }
     }
 
-    impl<A, M> HandleReply<A, M> for CxExclusive<A, M::Reply>
+    impl<A, M, F> HandleReply<A, M> for CxReply<'_, A, F>
     where
-        A: HasMailbox,
+        A: HasInterleaving,
         M: Message,
-        M::Reply: Send + 'static,
+        F: Future<Output = M::Reply> + Send,
     {
         fn handle(
             self,
@@ -650,10 +552,12 @@ pub(crate) mod sealed {
             scheduler: &mut ActorScheduler<A>,
             reply: DispatchReply<'_, A, M::Reply>,
         ) {
-            use crate::IntoActorFuture;
-            scheduler.__push_exclusive(
+            scheduler.__push_interleaved(
                 Seal,
-                CompleteReply::new(self.future.into_actor(), reply.into_owned()),
+                ScheduledFuture::scoped(
+                    CompleteReply::new(self.future, reply.into_owned()),
+                    self.lease,
+                ),
             );
         }
     }
@@ -726,7 +630,7 @@ pub(crate) mod sealed {
     where
         A: HasInterleaving,
         M: StreamReplyMessage,
-        F: ActorFuture<A, Output = M::Final> + Send + 'static,
+        F: Future<Output = M::Final> + Send + 'static,
     {
         fn handle_stream(
             self,
@@ -734,31 +638,18 @@ pub(crate) mod sealed {
             scheduler: &mut ActorScheduler<A>,
             final_tx: oneshot::Sender<M::Final>,
         ) {
-            scheduler.__push_interleaved(Seal, FinishStream::new(self.future, final_tx));
+            scheduler.__push_interleaved(
+                Seal,
+                ScheduledFuture::new(FinishStream::new(self.future, final_tx)),
+            );
         }
     }
 
-    impl<A, M, F> HandleStream<A, M> for Exclusive<F>
-    where
-        A: HasMailbox,
-        M: StreamReplyMessage,
-        F: ActorFuture<A, Output = M::Final> + Send + 'static,
-    {
-        fn handle_stream(
-            self,
-            _owned: &OwnedTasks<A>,
-            scheduler: &mut ActorScheduler<A>,
-            final_tx: oneshot::Sender<M::Final>,
-        ) {
-            scheduler.__push_exclusive(Seal, FinishStream::new(self.future, final_tx));
-        }
-    }
-
-    impl<A, M> HandleStream<A, M> for CxStream<A, M::Final>
+    impl<A, M, F> HandleStream<A, M> for CxStream<'_, A, F>
     where
         A: HasInterleaving,
         M: StreamReplyMessage,
-        M::Final: Send + 'static,
+        F: Future<Output = M::Final> + Send,
     {
         fn handle_stream(
             self,
@@ -766,26 +657,10 @@ pub(crate) mod sealed {
             scheduler: &mut ActorScheduler<A>,
             final_tx: oneshot::Sender<M::Final>,
         ) {
-            use crate::IntoActorFuture;
-            scheduler
-                .__push_interleaved(Seal, FinishStream::new(self.future.into_actor(), final_tx));
-        }
-    }
-
-    impl<A, M> HandleStream<A, M> for CxStreamExclusive<A, M::Final>
-    where
-        A: HasMailbox,
-        M: StreamReplyMessage,
-        M::Final: Send + 'static,
-    {
-        fn handle_stream(
-            self,
-            _owned: &OwnedTasks<A>,
-            scheduler: &mut ActorScheduler<A>,
-            final_tx: oneshot::Sender<M::Final>,
-        ) {
-            use crate::IntoActorFuture;
-            scheduler.__push_exclusive(Seal, FinishStream::new(self.future.into_actor(), final_tx));
+            scheduler.__push_interleaved(
+                Seal,
+                ScheduledFuture::scoped(FinishStream::new(self.future, final_tx), self.lease),
+            );
         }
     }
 
@@ -858,7 +733,7 @@ pub(crate) mod sealed {
     where
         A: HasInterleaving,
         M: StreamReplyMessage,
-        F: ActorFuture<A, Output = M::Final> + Send + 'static,
+        F: Future<Output = M::Final> + Send + 'static,
     {
         fn handle_stream_call(
             self,
@@ -866,51 +741,18 @@ pub(crate) mod sealed {
             scheduler: &mut ActorScheduler<A>,
             reply: DispatchReply<'_, A, M::Final>,
         ) {
-            scheduler.__push_interleaved(Seal, CompleteReply::new(self.future, reply.into_owned()));
-        }
-    }
-
-    impl<A, M, F> HandleStreamCall<A, M> for Exclusive<F>
-    where
-        A: HasMailbox,
-        M: StreamReplyMessage,
-        F: ActorFuture<A, Output = M::Final> + Send + 'static,
-    {
-        fn handle_stream_call(
-            self,
-            _owned: &OwnedTasks<A>,
-            scheduler: &mut ActorScheduler<A>,
-            reply: DispatchReply<'_, A, M::Final>,
-        ) {
-            scheduler.__push_exclusive(Seal, CompleteReply::new(self.future, reply.into_owned()));
-        }
-    }
-
-    impl<A, M> HandleStreamCall<A, M> for CxStream<A, M::Final>
-    where
-        A: HasInterleaving,
-        M: StreamReplyMessage,
-        M::Final: Send + 'static,
-    {
-        fn handle_stream_call(
-            self,
-            _owned: &OwnedTasks<A>,
-            scheduler: &mut ActorScheduler<A>,
-            reply: DispatchReply<'_, A, M::Final>,
-        ) {
-            use crate::IntoActorFuture;
             scheduler.__push_interleaved(
                 Seal,
-                CompleteReply::new(self.future.into_actor(), reply.into_owned()),
+                ScheduledFuture::new(CompleteReply::new(self.future, reply.into_owned())),
             );
         }
     }
 
-    impl<A, M> HandleStreamCall<A, M> for CxStreamExclusive<A, M::Final>
+    impl<A, M, F> HandleStreamCall<A, M> for CxStream<'_, A, F>
     where
-        A: HasMailbox,
+        A: HasInterleaving,
         M: StreamReplyMessage,
-        M::Final: Send + 'static,
+        F: Future<Output = M::Final> + Send,
     {
         fn handle_stream_call(
             self,
@@ -918,10 +760,12 @@ pub(crate) mod sealed {
             scheduler: &mut ActorScheduler<A>,
             reply: DispatchReply<'_, A, M::Final>,
         ) {
-            use crate::IntoActorFuture;
-            scheduler.__push_exclusive(
+            scheduler.__push_interleaved(
                 Seal,
-                CompleteReply::new(self.future.into_actor(), reply.into_owned()),
+                ScheduledFuture::scoped(
+                    CompleteReply::new(self.future, reply.into_owned()),
+                    self.lease,
+                ),
             );
         }
     }
@@ -975,30 +819,6 @@ where
     fn poll(self: Pin<&mut Self>, task: &mut Context<'_>) -> Poll<Self::Output> {
         let this = self.project();
         let value = std::task::ready!(this.future.poll(task));
-        this.reply
-            .take()
-            .expect("reply completion runs exactly once")
-            .complete(value);
-        Poll::Ready(())
-    }
-}
-
-impl<A, F, R> ActorFuture<A> for CompleteReply<A, F, R>
-where
-    A: Actor,
-    F: ActorFuture<A, Output = R>,
-    R: Send + 'static,
-{
-    type Output = ();
-
-    fn poll(
-        self: Pin<&mut Self>,
-        actor: &mut A,
-        scope: &mut ActorScope<'_, A>,
-        task: &mut Context<'_>,
-    ) -> Poll<Self::Output> {
-        let this = self.project();
-        let value = std::task::ready!(this.future.poll(actor, scope, task));
         this.reply
             .take()
             .expect("reply completion runs exactly once")

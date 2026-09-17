@@ -58,7 +58,7 @@ impl DispatchHandler<Start> for Parent {
         &mut self,
         message: Start,
         _scope: &mut ActorScope<Self>,
-    ) -> impl loac::IntoReply<Self, Start> + use<> {
+    ) -> impl loac::IntoReply<Self, Start> {
         assert!(
             self.child
                 .try_send(VisitChild {
@@ -75,7 +75,7 @@ impl DispatchHandler<VisitChild> for Child {
         &mut self,
         message: VisitChild,
         _scope: &mut ActorScope<Self>,
-    ) -> impl loac::IntoReply<Self, VisitChild> + use<> {
+    ) -> impl loac::IntoReply<Self, VisitChild> {
         assert!(
             self.parent
                 .try_send(ReturnToParent {
@@ -92,7 +92,7 @@ impl DispatchHandler<ReturnToParent> for Parent {
         &mut self,
         message: ReturnToParent,
         _scope: &mut ActorScope<Self>,
-    ) -> impl loac::IntoReply<Self, ReturnToParent> + use<> {
+    ) -> impl loac::IntoReply<Self, ReturnToParent> {
         let _ = message.completed.send(());
         ().ready()
     }

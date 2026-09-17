@@ -1,7 +1,11 @@
+use std::sync::{
+    Arc,
+    atomic::{AtomicUsize, Ordering},
+};
+
 use loac::{
-    Actor, ActorFutureExt, ActorScope, CallError, DispatchHandler, ExitReason,
-    InterleavedFutureExt, IntoActorFuture, Message, ReplyExt, Shutdown, ShutdownStatus,
-    TryCallErrorKind, actor,
+    Actor, ActorScope, CallError, Cx, DispatchHandler, ExitReason, Handler, InterleavedFutureExt,
+    Message, Shutdown, ShutdownStatus, TryCallErrorKind, actor,
 };
 use tokio::sync::oneshot;
 
@@ -14,21 +18,15 @@ use super::{
 #[message(reply = ())]
 struct StopFromExclusive;
 
-impl DispatchHandler<StopFromExclusive> for LifecycleActor {
-    fn handle(
-        &mut self,
-        _message: StopFromExclusive,
-        _scope: &mut ActorScope<'_, Self>,
-    ) -> impl loac::IntoReply<Self, StopFromExclusive> + use<> {
-        async {}
-            .into_actor()
-            .map(|(), _actor: &mut Self, scope| {
-                assert_eq!(
-                    scope.request_shutdown(Shutdown::Stop),
-                    ShutdownStatus::Requested
-                );
-            })
-            .exclusive()
+impl Handler<StopFromExclusive> for LifecycleActor {
+    async fn handle(_message: StopFromExclusive, mut cx: Cx<'_, Self>) {
+        let mut guard = cx.exclusive();
+        guard.with(|_, scope| {
+            assert_eq!(
+                scope.request_shutdown(Shutdown::Stop),
+                ShutdownStatus::Requested
+            );
+        });
     }
 }
 
@@ -43,6 +41,91 @@ async fn exclusive_completion_can_commit_graceful_shutdown_without_repoll() {
     assert_eq!(watchdog(actor.call(StopFromExclusive)).await, Ok(()));
     assert_eq!(watchdog(owner.wait()).await.reason(), ExitReason::Stopped);
     assert_eq!(*lock(&cleanup), vec![ExitReason::Stopped]);
+}
+
+struct LeaseHookActor {
+    phase: Arc<AtomicUsize>,
+    observation: Option<oneshot::Sender<(Shutdown, usize)>>,
+}
+
+struct LeaseHookArgs {
+    phase: Arc<AtomicUsize>,
+    observation: oneshot::Sender<(Shutdown, usize)>,
+}
+
+#[actor(mailbox, interleaved)]
+impl Actor for LeaseHookActor {
+    type SpawnArgs = LeaseHookArgs;
+
+    async fn init(args: Self::SpawnArgs, _scope: &mut ActorScope<'_, Self>) -> Self {
+        Self {
+            phase: args.phase,
+            observation: Some(args.observation),
+        }
+    }
+
+    fn on_shutdown(&mut self, shutdown: Shutdown) {
+        let phase = self.phase.load(Ordering::SeqCst);
+        if let Some(observation) = self.observation.take() {
+            let _ = observation.send((shutdown, phase));
+        }
+    }
+}
+
+#[derive(Message)]
+#[message(reply = ())]
+struct HoldLease {
+    entered: oneshot::Sender<()>,
+    release: oneshot::Receiver<()>,
+}
+
+impl Handler<HoldLease> for LeaseHookActor {
+    async fn handle(message: HoldLease, mut cx: Cx<'_, Self>) {
+        let mut guard = cx.exclusive();
+        guard.with(|actor, _| actor.phase.store(1, Ordering::SeqCst));
+        let _ = message.entered.send(());
+        let _ = message.release.await;
+        guard.with(|actor, _| actor.phase.store(2, Ordering::SeqCst));
+    }
+}
+
+async fn assert_shutdown_preempts_lease(shutdown: Shutdown, reason: ExitReason) {
+    let phase = Arc::new(AtomicUsize::new(0));
+    let (observation_tx, observation_rx) = oneshot::channel();
+    let mut owner = loac::spawn::<LeaseHookActor>(LeaseHookArgs {
+        phase: Arc::clone(&phase),
+        observation: observation_tx,
+    });
+    let actor = owner.actor_ref();
+    let (entered_tx, entered_rx) = oneshot::channel();
+    let (release_tx, release_rx) = oneshot::channel();
+    let reply = tokio::spawn(async move {
+        actor
+            .call(HoldLease {
+                entered: entered_tx,
+                release: release_rx,
+            })
+            .await
+    });
+
+    watchdog(entered_rx).await.unwrap();
+    assert_eq!(owner.request_shutdown(shutdown), ShutdownStatus::Requested);
+    assert_eq!(watchdog(observation_rx).await.unwrap(), (shutdown, 1));
+
+    release_tx.send(()).unwrap();
+    assert_eq!(watchdog(reply).await.unwrap(), Ok(()));
+    assert_eq!(watchdog(owner.wait()).await.reason(), reason);
+    assert_eq!(phase.load(Ordering::SeqCst), 2);
+}
+
+#[tokio::test]
+async fn stop_hook_preempts_an_exclusive_lease() {
+    assert_shutdown_preempts_lease(Shutdown::Stop, ExitReason::Stopped).await;
+}
+
+#[tokio::test]
+async fn drain_hook_preempts_an_exclusive_lease() {
+    assert_shutdown_preempts_lease(Shutdown::Drain, ExitReason::Drained).await;
 }
 
 // Stop finishes the current message and cancels queued messages.
@@ -160,13 +243,12 @@ impl DispatchHandler<InterleavedDrainStep> for InterleavedDrainActor {
         &mut self,
         message: InterleavedDrainStep,
         _scope: &mut ActorScope<'_, Self>,
-    ) -> impl loac::IntoReply<Self, InterleavedDrainStep> + use<> {
+    ) -> impl loac::IntoReply<Self, InterleavedDrainStep> {
         async move {
             let _ = message.entered.send(());
             let _ = message.release.await;
             message.id
         }
-        .into_actor()
         .interleaved()
     }
 }

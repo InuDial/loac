@@ -4,8 +4,8 @@ use std::{
 };
 
 use loac::{
-    ActorFutureExt, ActorScope, CallError, DispatchHandler, ExitReason, IntoActorFuture, Message,
-    ReplyExt, Shutdown, TryCallErrorKind, TrySendErrorKind, spawn_with,
+    ActorScope, CallError, Cx, DispatchHandler, ExitReason, Handler, Message, ReplyExt, Shutdown,
+    TryCallErrorKind, TrySendErrorKind, spawn_with,
 };
 
 use super::{
@@ -22,7 +22,7 @@ impl DispatchHandler<Snapshot> for SerialActor {
         &mut self,
         _message: Snapshot,
         _scope: &mut ActorScope<Self>,
-    ) -> impl loac::IntoReply<Self, Snapshot> + use<> {
+    ) -> impl loac::IntoReply<Self, Snapshot> {
         lock(&self.committed).clone().ready()
     }
 }
@@ -35,22 +35,12 @@ struct CommitAfterRelease {
     release: tokio::sync::oneshot::Receiver<()>,
 }
 
-impl DispatchHandler<CommitAfterRelease> for SerialActor {
-    fn handle(
-        &mut self,
-        message: CommitAfterRelease,
-        _scope: &mut ActorScope<Self>,
-    ) -> impl loac::IntoReply<Self, CommitAfterRelease> + use<> {
-        async move {
-            let _ = message.entered.send(());
-            let _ = message.release.await;
-            message.value
-        }
-        .into_actor()
-        .map(|value, actor: &mut Self, _scope| {
-            lock(&actor.committed).push(value);
-        })
-        .exclusive()
+impl Handler<CommitAfterRelease> for SerialActor {
+    async fn handle(message: CommitAfterRelease, mut cx: Cx<'_, Self>) {
+        let mut guard = cx.exclusive();
+        let _ = message.entered.send(());
+        let _ = message.release.await;
+        guard.with(|actor, _| lock(&actor.committed).push(message.value));
     }
 }
 

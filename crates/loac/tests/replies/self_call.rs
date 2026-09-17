@@ -20,7 +20,7 @@ impl DispatchHandler<Echo> for SelfCaller {
         &mut self,
         message: Echo,
         _scope: &mut ActorScope<Self>,
-    ) -> impl loac::IntoReply<Self, Echo> + use<> {
+    ) -> impl loac::IntoReply<Self, Echo> {
         message.0.ready()
     }
 }
@@ -34,7 +34,7 @@ impl DispatchHandler<OwnedSelfCall> for SelfCaller {
         &mut self,
         message: OwnedSelfCall,
         scope: &mut ActorScope<Self>,
-    ) -> impl loac::IntoReply<Self, OwnedSelfCall> + use<> {
+    ) -> impl loac::IntoReply<Self, OwnedSelfCall> {
         let response = scope.try_call(Echo(message.0)).unwrap();
         async move { response.await.unwrap() }
     }
@@ -49,11 +49,9 @@ impl DispatchHandler<InterleavedSelfCall> for SelfCaller {
         &mut self,
         message: InterleavedSelfCall,
         scope: &mut ActorScope<Self>,
-    ) -> impl loac::IntoReply<Self, InterleavedSelfCall> + use<> {
+    ) -> impl loac::IntoReply<Self, InterleavedSelfCall> {
         let response = scope.try_call(Echo(message.0)).unwrap();
-        async move { response.await.unwrap() }
-            .into_actor()
-            .interleaved()
+        async move { response.await.unwrap() }.interleaved()
     }
 }
 
@@ -64,21 +62,14 @@ struct ExclusiveSelfCall {
     polled: oneshot::Sender<()>,
 }
 
-impl DispatchHandler<ExclusiveSelfCall> for SelfCaller {
-    fn handle(
-        &mut self,
-        message: ExclusiveSelfCall,
-        scope: &mut ActorScope<Self>,
-    ) -> impl loac::IntoReply<Self, ExclusiveSelfCall> + use<> {
-        let awaited = scope.try_call(Echo(1)).unwrap();
-        let observed = scope.try_call(Echo(2)).unwrap();
+impl Handler<ExclusiveSelfCall> for SelfCaller {
+    async fn handle(message: ExclusiveSelfCall, mut cx: Cx<'_, Self>) {
+        let awaited = cx.try_call(Echo(1)).unwrap();
+        let observed = cx.try_call(Echo(2)).unwrap();
         let _ = message.observed.send(observed);
-        async move {
-            let _ = message.polled.send(());
-            awaited.await.unwrap();
-        }
-        .into_actor()
-        .exclusive()
+        let _guard = cx.exclusive();
+        let _ = message.polled.send(());
+        awaited.await.unwrap();
     }
 }
 

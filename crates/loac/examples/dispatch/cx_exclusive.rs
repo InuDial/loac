@@ -1,9 +1,6 @@
-//! Builds dispatch-handler cx futures on the exclusive lane.
+//! Uses scoped scheduler leases inside cx futures.
 //!
-//! A `DispatchHandler` chooses an explicit reply strategy. The `ActorScope`
-//! constructors `cx_exclusive` and `cx_stream_exclusive` keep the `Cx::with`
-//! access style while selecting exclusive scheduling: the actor task polls the
-//! returned future with mailbox dispatch paused, and owned tasks may continue.
+//! An exclusive guard pauses other actor work until its destructor runs.
 //!
 //! ```console
 //! cargo run -p loac --example cx_exclusive
@@ -16,7 +13,7 @@ use tokio::sync::oneshot;
 
 struct Counter(u64);
 
-#[actor(mailbox)]
+#[actor(mailbox, interleaved)]
 impl Actor for Counter {
     type SpawnArgs = u64;
 
@@ -34,7 +31,7 @@ impl DispatchHandler<Read> for Counter {
         &mut self,
         _message: Read,
         _scope: &mut ActorScope<Self>,
-    ) -> impl loac::IntoReply<Self, Read> + use<> {
+    ) -> impl loac::IntoReply<Self, Read> {
         self.0.ready()
     }
 }
@@ -47,21 +44,14 @@ struct AddExclusive {
     resume: oneshot::Receiver<()>,
 }
 
-impl DispatchHandler<AddExclusive> for Counter {
-    fn handle(
-        &mut self,
-        message: AddExclusive,
-        scope: &mut ActorScope<Self>,
-    ) -> impl loac::IntoReply<Self, AddExclusive> + use<> {
-        scope.cx_exclusive(self, move |mut cx| {
-            Box::pin(async move {
-                let _ = message.started.send(());
-                let _ = message.resume.await;
-                cx.with(|actor, _| {
-                    actor.0 += message.amount;
-                    actor.0
-                })
-            })
+impl Handler<AddExclusive> for Counter {
+    async fn handle(message: AddExclusive, mut cx: Cx<'_, Self>) -> u64 {
+        let mut guard = cx.exclusive();
+        let _ = message.started.send(());
+        let _ = message.resume.await;
+        guard.with(|actor, _| {
+            actor.0 += message.amount;
+            actor.0
         })
     }
 }
@@ -70,26 +60,22 @@ impl DispatchHandler<AddExclusive> for Counter {
 #[message(stream = u8, reply = u8)]
 struct StreamExclusive;
 
-impl DispatchHandler<StreamExclusive, StreamKind> for Counter {
-    fn handle(
-        &mut self,
+impl StreamHandler<StreamExclusive> for Counter {
+    async fn handle<'a, W>(
         _message: StreamExclusive,
-        scope: &mut ActorScope<Self>,
-    ) -> impl loac::IntoReply<Self, StreamExclusive> + use<> {
-        let (item_tx, item_rx) = tokio::sync::mpsc::channel::<u8>(8);
-        let (final_tx, final_rx) = tokio::sync::oneshot::channel::<u8>();
-        let strategy = scope.cx_stream_exclusive(self, move |mut cx| {
-            Box::pin(async move {
-                let mut out = item_tx;
-                let next = cx.with(|actor, _| {
-                    actor.0 += 1;
-                    actor.0 as u8
-                });
-                let _ = out.write(next).await;
-                next
-            })
+        mut out: StreamOut<'a, W>,
+        mut cx: Cx<'a, Self>,
+    ) -> u8
+    where
+        W: Writer<u8> + Send + 'a,
+    {
+        let mut guard = cx.exclusive();
+        let next = guard.with(|actor, _| {
+            actor.0 += 1;
+            actor.0 as u8
         });
-        loac::StreamDispatch::new(strategy, item_rx, final_tx, final_rx)
+        let _ = out.write(next).await;
+        next
     }
 }
 

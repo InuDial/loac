@@ -24,7 +24,7 @@ impl<const N: usize> DispatchHandler<ReadTypeParameter> for Service<N> {
         &mut self,
         _message: ReadTypeParameter,
         _scope: &mut ActorScope<Self>,
-    ) -> impl loac::IntoReply<Self, ReadTypeParameter> + use<N> {
+    ) -> impl loac::IntoReply<Self, ReadTypeParameter> {
         N.ready()
     }
 }

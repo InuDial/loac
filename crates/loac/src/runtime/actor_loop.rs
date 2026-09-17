@@ -1,12 +1,22 @@
-use super::shutdown::{drain_actor, fail_actor, stop_actor};
+use super::shutdown::{
+    drain_actor, fail_actor, fail_uninitialized, kill_actor, kill_uninitialized, stop_actor,
+};
 use super::*;
+
+// Fields drop in declaration order.
+// Scheduled futures may target the pinned actor cell.
+// Therefore, `scheduler` must drop before `access`.
+struct RunningActor<A: Actor> {
+    scheduler: ActorScheduler<A>,
+    access: ActorAccess<A>,
+}
 
 pub(crate) async fn run_actor<A: Actor>(
     args: A::SpawnArgs,
     actor_ref: ActorRef<A>,
     mut state: ScopeState<A>,
     mut inbox: ActorInbox<A>,
-    mut scheduler: ActorScheduler<A>,
+    scheduler: ActorScheduler<A>,
 ) -> ExitStatus {
     let inner = Arc::clone(&actor_ref.0);
     let control = &inner.control;
@@ -26,80 +36,106 @@ pub(crate) async fn run_actor<A: Actor>(
         Work::Killed
     };
 
-    let mut actor = match initialized {
+    let actor = match initialized {
         Work::Complete(actor) => actor,
         Work::Killed => {
-            return kill_actor(&mut state, &mut inbox, control, &owned, &mut scheduler).await;
+            return kill_uninitialized(&mut state, &mut inbox, control, &owned).await;
         }
         Work::Panicked => {
-            return fail_actor(&mut state, &mut inbox, control, &owned, &mut scheduler).await;
+            return fail_uninitialized(&mut state, &mut inbox, control, &owned).await;
         }
         Work::DropPanicked(actor) => {
             // The init frame failed after producing actor state.
             // Descendant cancellation must precede arbitrary actor Drop code.
             state.children().request_all(Shutdown::Kill);
             control.drop_user_value(actor);
-            return fail_actor(&mut state, &mut inbox, control, &owned, &mut scheduler).await;
+            return fail_uninitialized(&mut state, &mut inbox, control, &owned).await;
         }
     };
 
-    // The scheduler owns every actor-aware reply future.
-    // Those futures may retain `Cx` handles during destruction.
-    // `Cx` targets `actor`, `state`, and the `actor_ref` parameter.
-    // Re-bind `scheduler` as a local declared after `actor` so async-fn drop
-    // glue releases it before `actor` on every exit path, including an aborted
-    // actor task. Otherwise an abort could drop the actor first and let a
-    // future's `Drop` call `Cx::with` through dangling pointers.
-    let mut scheduler = scheduler;
+    let mut running = RunningActor {
+        scheduler,
+        access: ActorAccess::new(actor_ref, actor, state),
+    };
 
     loop {
         match control.mode() {
             Mode::Running => {}
             Mode::Draining => {
-                match panic::catch_unwind(AssertUnwindSafe(|| actor.on_shutdown(Shutdown::Drain))) {
+                match panic::catch_unwind(AssertUnwindSafe(|| {
+                    running
+                        .access
+                        .with_actor(|actor| actor.on_shutdown(Shutdown::Drain))
+                })) {
                     Ok(()) => {}
                     Err(payload) => {
                         control.contain_panic(payload);
-                        return fail_actor(&mut state, &mut inbox, control, &owned, &mut scheduler)
-                            .await;
+                        return fail_actor(
+                            &mut running.access,
+                            &mut inbox,
+                            control,
+                            &owned,
+                            &mut running.scheduler,
+                        )
+                        .await;
                     }
                 }
                 return drain_actor(
-                    &mut actor,
-                    &actor_ref,
-                    &mut state,
+                    &mut running.access,
                     &mut inbox,
                     &inner,
                     &owned,
-                    &mut scheduler,
+                    &mut running.scheduler,
                 )
                 .await;
             }
             Mode::Stopping => {
-                match panic::catch_unwind(AssertUnwindSafe(|| actor.on_shutdown(Shutdown::Stop))) {
+                match panic::catch_unwind(AssertUnwindSafe(|| {
+                    running
+                        .access
+                        .with_actor(|actor| actor.on_shutdown(Shutdown::Stop))
+                })) {
                     Ok(()) => {}
                     Err(payload) => {
                         control.contain_panic(payload);
-                        return fail_actor(&mut state, &mut inbox, control, &owned, &mut scheduler)
-                            .await;
+                        return fail_actor(
+                            &mut running.access,
+                            &mut inbox,
+                            control,
+                            &owned,
+                            &mut running.scheduler,
+                        )
+                        .await;
                     }
                 }
                 return stop_actor(
-                    &mut actor,
-                    &actor_ref,
-                    &mut state,
+                    &mut running.access,
                     &mut inbox,
                     control,
                     &owned,
-                    &mut scheduler,
+                    &mut running.scheduler,
                 )
                 .await;
             }
             Mode::Killing => {
-                return kill_actor(&mut state, &mut inbox, control, &owned, &mut scheduler).await;
+                return kill_actor(
+                    &mut running.access,
+                    &mut inbox,
+                    control,
+                    &owned,
+                    &mut running.scheduler,
+                )
+                .await;
             }
             Mode::Failing => {
-                return fail_actor(&mut state, &mut inbox, control, &owned, &mut scheduler).await;
+                return fail_actor(
+                    &mut running.access,
+                    &mut inbox,
+                    control,
+                    &owned,
+                    &mut running.scheduler,
+                )
+                .await;
             }
             Mode::Exited(status) => return status,
             Mode::Aborting => {
@@ -108,13 +144,11 @@ pub(crate) async fn run_actor<A: Actor>(
         }
 
         let turn = AssertUnwindSafe(actor_turn(
-            &mut actor,
-            &actor_ref,
-            &mut state,
+            &mut running.access,
             &mut inbox,
             &inner,
             &owned,
-            &mut scheduler,
+            &mut running.scheduler,
             true,
             Mode::Running,
         ))
@@ -125,29 +159,55 @@ pub(crate) async fn run_actor<A: Actor>(
             Ok(turn) => turn,
             Err(payload) => {
                 control.contain_panic(payload);
-                return fail_actor(&mut state, &mut inbox, control, &owned, &mut scheduler).await;
+                return fail_actor(
+                    &mut running.access,
+                    &mut inbox,
+                    control,
+                    &owned,
+                    &mut running.scheduler,
+                )
+                .await;
             }
         };
 
         match turn {
             SchedulerTurn::LifecycleHint | SchedulerTurn::Progress => {}
             SchedulerTurn::Child(event) => {
-                match handle_child_exit(&mut actor, &actor_ref, &mut state, event, control).await {
+                match handle_child_exit(&mut running.access, event, control).await {
                     Work::Complete(()) => {}
                     Work::Killed => {
-                        return kill_actor(&mut state, &mut inbox, control, &owned, &mut scheduler)
-                            .await;
+                        return kill_actor(
+                            &mut running.access,
+                            &mut inbox,
+                            control,
+                            &owned,
+                            &mut running.scheduler,
+                        )
+                        .await;
                     }
                     Work::Panicked | Work::DropPanicked(()) => {
                         control.begin_failure();
-                        return fail_actor(&mut state, &mut inbox, control, &owned, &mut scheduler)
-                            .await;
+                        return fail_actor(
+                            &mut running.access,
+                            &mut inbox,
+                            control,
+                            &owned,
+                            &mut running.scheduler,
+                        )
+                        .await;
                     }
                 }
             }
             SchedulerTurn::InboxClosed => {
                 control.begin_failure();
-                return fail_actor(&mut state, &mut inbox, control, &owned, &mut scheduler).await;
+                return fail_actor(
+                    &mut running.access,
+                    &mut inbox,
+                    control,
+                    &owned,
+                    &mut running.scheduler,
+                )
+                .await;
             }
         }
     }
@@ -160,14 +220,8 @@ pub(crate) enum DrainTurn {
 
 // Scheduler work keeps priority over the owned-task completion barrier.
 // The nested scheduler turn preserves lifecycle-first polling.
-#[expect(
-    clippy::too_many_arguments,
-    reason = "drain polling borrows each independent actor-task resource"
-)]
 pub(crate) async fn drain_turn<A: Actor>(
-    actor: &mut A,
-    actor_ref: &ActorRef<A>,
-    state: &mut ScopeState<A>,
+    access: &mut ActorAccess<A>,
     inbox: &mut ActorInbox<A>,
     inner: &Arc<ActorInner<A>>,
     owned: &OwnedTasks<A>,
@@ -179,9 +233,7 @@ pub(crate) async fn drain_turn<A: Actor>(
     tokio::select! {
         biased;
         turn = actor_turn(
-            actor,
-            actor_ref,
-            state,
+            access,
             inbox,
             inner,
             owned,
@@ -194,13 +246,11 @@ pub(crate) async fn drain_turn<A: Actor>(
 }
 
 pub(crate) async fn handle_child_exit<A: Actor>(
-    actor: &mut A,
-    actor_ref: &ActorRef<A>,
-    state: &mut ScopeState<A>,
+    access: &mut ActorAccess<A>,
     event: ChildExit,
     control: &Control,
 ) -> Work {
-    if !state.children().reap(&event) {
+    if !access.state().children().reap(&event) {
         return Work::Complete(());
     }
 
@@ -208,21 +258,19 @@ pub(crate) async fn handle_child_exit<A: Actor>(
         return Work::Complete(());
     };
 
-    run_child_exit_hook(actor, actor_ref, state, event, control, permit).await
+    run_child_exit_hook(access, event, control, permit).await
 }
 
 /// Makes the private gate proof mandatory at the only user hook call site.
 async fn run_child_exit_hook<A: Actor>(
-    actor: &mut A,
-    actor_ref: &ActorRef<A>,
-    state: &mut ScopeState<A>,
+    access: &mut ActorAccess<A>,
     event: ChildExit,
     control: &Control,
     _permit: HookEntryPermit,
 ) -> Work {
     await_actor_work(
         async {
-            let mut scope = state.actor_scope(actor_ref);
+            let (actor, mut scope) = access.parts();
             actor.on_child_exit(event, &mut scope).await;
         },
         control,
@@ -230,16 +278,10 @@ async fn run_child_exit_hook<A: Actor>(
     .await
 }
 
-#[expect(
-    clippy::too_many_arguments,
-    reason = "one turn borrows each independent actor-task resource"
-)]
 // Scheduler profiles own their eligible lane rotation.
 // Lifecycle keeps first poll rights across every profile.
 pub(crate) async fn actor_turn<A: Actor>(
-    actor: &mut A,
-    actor_ref: &ActorRef<A>,
-    state: &mut ScopeState<A>,
+    access: &mut ActorAccess<A>,
     inbox: &mut ActorInbox<A>,
     inner: &Arc<ActorInner<A>>,
     owned: &OwnedTasks<A>,
@@ -250,9 +292,7 @@ pub(crate) async fn actor_turn<A: Actor>(
     let control = &inner.control;
     let fair_turn = std::future::poll_fn(|task| {
         let mut turn = TurnContext {
-            actor,
-            actor_ref,
-            state,
+            access,
             inbox,
             inner,
             owned,

@@ -20,7 +20,7 @@ impl DispatchHandler<Ping> for Ponger {
         &mut self,
         _message: Ping,
         _scope: &mut ActorScope<'_, Self>,
-    ) -> impl loac::IntoReply<Self, Ping> + use<> {
+    ) -> impl loac::IntoReply<Self, Ping> {
         "pong".ready()
     }
 }
@@ -47,7 +47,7 @@ impl DispatchHandler<AskPong> for Pinger {
         &mut self,
         _message: AskPong,
         _scope: &mut ActorScope<'_, Self>,
-    ) -> impl loac::IntoReply<Self, AskPong> + use<> {
+    ) -> impl loac::IntoReply<Self, AskPong> {
         let ponger = self.ponger.clone();
         async move { ponger.call(Ping).await.unwrap().to_owned() }
     }

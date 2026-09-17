@@ -16,23 +16,22 @@ use tokio::sync::oneshot;
 
 use crate::{
     Actor, ActorConfig, ActorRef, ActorScope, ChildExit, ChildId, DispatchHandler, ExitReason,
-    ExitStatus, IntoActorFuture, Message, MessageConfig, ReplyExt, Shutdown, ShutdownStatus,
-    SubtreeStatus,
+    ExitStatus, Message, MessageConfig, ReplyExt, Shutdown, ShutdownStatus, SubtreeStatus,
     actor::HasMailbox,
     mailbox::{ActorInbox, ActorInner, Control, Envelope, Mode},
     owned::OwnedTasks,
     scheduling::{
-        ActorScheduler, InterleavedLane, InterleavedProfile, InterleavedScheduler, SchedulerTurn,
-        Seal,
+        ActorScheduler, InterleavedLane, InterleavedProfile, InterleavedScheduler, ScheduledFuture,
+        SchedulerTurn, Seal,
     },
     supervision::runtime::{RuntimeChildren, tests::ChildrenFixture},
     transport::MessageSender,
 };
 
 use super::{
-    ActorTask, ActorWorkGuard, ActorWorkState, DiscardOutcome, DrainTurn, ExitGuard, ScopeState,
-    TEARDOWN_DROP_BUDGET, Work, actor_turn, await_actor_work, close_and_discard, drain_turn,
-    graceful_finish, handle_child_exit, kill_actor, run_actor,
+    ActorAccess, ActorTask, ActorWorkGuard, ActorWorkState, DiscardOutcome, DrainTurn, ExitGuard,
+    ScopeState, TEARDOWN_DROP_BUDGET, Work, actor_turn, await_actor_work, close_and_discard,
+    drain_turn, graceful_finish, handle_child_exit, kill_actor, run_actor,
 };
 
 mod actor_turn;
@@ -280,7 +279,7 @@ impl DispatchHandler<Ping> for AbortChildParent {
         &mut self,
         _message: Ping,
         _scope: &mut ActorScope<Self>,
-    ) -> impl crate::IntoReply<Self, Ping> + use<> {
+    ) -> impl crate::IntoReply<Self, Ping> {
         ().ready()
     }
 }

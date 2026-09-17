@@ -29,8 +29,8 @@ use std::{
 
 use criterion::{BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
 use loac::{
-    Actor, ActorOwner, ActorRef, ActorScope, DispatchHandler, ExitReason, InterleavedFutureExt,
-    IntoActorFuture, Message, ReplyExt, Response, Shutdown, SpawnOptions, TryCallErrorKind,
+    Actor, ActorOwner, ActorRef, ActorScope, Cx, DispatchHandler, ExitReason, Handler,
+    InterleavedFutureExt, Message, ReplyExt, Response, Shutdown, SpawnOptions, TryCallErrorKind,
     spawn_with,
 };
 use tokio::sync::{mpsc, oneshot};
@@ -121,7 +121,7 @@ impl DispatchHandler<OwnedReply> for ReplyActor {
         &mut self,
         message: OwnedReply,
         _scope: &mut ActorScope<Self>,
-    ) -> impl loac::IntoReply<Self, OwnedReply> + use<> {
+    ) -> impl loac::IntoReply<Self, OwnedReply> {
         async move {
             let _ = message.started.send(());
             let _ = message.release.await;
@@ -141,12 +141,11 @@ impl DispatchHandler<InterleavedReply> for ReplyActor {
         &mut self,
         message: InterleavedReply,
         _scope: &mut ActorScope<Self>,
-    ) -> impl loac::IntoReply<Self, InterleavedReply> + use<> {
+    ) -> impl loac::IntoReply<Self, InterleavedReply> {
         async move {
             let _ = message.started.send(());
             let _ = message.release.await;
         }
-        .into_actor()
         .interleaved()
     }
 }
@@ -189,7 +188,7 @@ impl DispatchHandler<OwnedWakeProbe> for ReplyActor {
         &mut self,
         message: OwnedWakeProbe,
         _scope: &mut ActorScope<Self>,
-    ) -> impl loac::IntoReply<Self, OwnedWakeProbe> + use<> {
+    ) -> impl loac::IntoReply<Self, OwnedWakeProbe> {
         message.0
     }
 }
@@ -203,8 +202,8 @@ impl DispatchHandler<InterleavedWakeProbe> for ReplyActor {
         &mut self,
         message: InterleavedWakeProbe,
         _scope: &mut ActorScope<Self>,
-    ) -> impl loac::IntoReply<Self, InterleavedWakeProbe> + use<> {
-        message.0.into_actor().interleaved()
+    ) -> impl loac::IntoReply<Self, InterleavedWakeProbe> {
+        message.0.interleaved()
     }
 }
 
@@ -217,7 +216,7 @@ impl DispatchHandler<MailboxBacklog> for ReplyActor {
         &mut self,
         _message: MailboxBacklog,
         _scope: &mut ActorScope<Self>,
-    ) -> impl loac::IntoReply<Self, MailboxBacklog> + use<> {
+    ) -> impl loac::IntoReply<Self, MailboxBacklog> {
         ().ready()
     }
 }
@@ -234,7 +233,7 @@ impl DispatchHandler<MailboxTurnTrigger> for ReplyActor {
         &mut self,
         message: MailboxTurnTrigger,
         _scope: &mut ActorScope<Self>,
-    ) -> impl loac::IntoReply<Self, MailboxTurnTrigger> + use<> {
+    ) -> impl loac::IntoReply<Self, MailboxTurnTrigger> {
         if message
             .commands
             .try_send(WakeCommand {
@@ -256,21 +255,14 @@ struct StageMailboxBacklog {
     release: oneshot::Receiver<()>,
 }
 
-impl DispatchHandler<StageMailboxBacklog> for ReplyActor {
-    fn handle(
-        &mut self,
-        message: StageMailboxBacklog,
-        _scope: &mut ActorScope<Self>,
-    ) -> impl loac::IntoReply<Self, StageMailboxBacklog> + use<> {
-        async move {
-            let _ = message.entered.send(());
-            message
-                .release
-                .await
-                .expect("the benchmark releases the exclusive staging barrier");
-        }
-        .into_actor()
-        .exclusive()
+impl Handler<StageMailboxBacklog> for ReplyActor {
+    async fn handle(message: StageMailboxBacklog, mut cx: Cx<'_, Self>) {
+        let _guard = cx.exclusive();
+        let _ = message.entered.send(());
+        message
+            .release
+            .await
+            .expect("the benchmark releases the exclusive staging barrier");
     }
 }
 

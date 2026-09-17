@@ -28,13 +28,12 @@ impl DispatchHandler<CancellableWork> for CancellationActor {
         &mut self,
         message: CancellableWork,
         _scope: &mut ActorScope<Self>,
-    ) -> impl loac::IntoReply<Self, CancellableWork> + use<> {
+    ) -> impl loac::IntoReply<Self, CancellableWork> {
         async move {
             let _ = message.started.send(());
             message.cancellation.cancelled().await;
             WorkCancelled
         }
-        .into_actor()
         .interleaved()
     }
 }
@@ -50,7 +49,7 @@ impl DispatchHandler<CancelWork> for CancellationActor {
         &mut self,
         message: CancelWork,
         _scope: &mut ActorScope<Self>,
-    ) -> impl loac::IntoReply<Self, CancelWork> + use<> {
+    ) -> impl loac::IntoReply<Self, CancelWork> {
         let _ = message.dispatched.send(());
         ().ready()
     }

@@ -18,7 +18,7 @@ impl DispatchHandler<PendingOwned> for ProgressActor {
         &mut self,
         message: PendingOwned,
         _scope: &mut ActorScope<Self>,
-    ) -> impl loac::IntoReply<Self, PendingOwned> + use<> {
+    ) -> impl loac::IntoReply<Self, PendingOwned> {
         async move {
             let _ = message.entered.send(());
             let _ = message.release.await;
@@ -35,7 +35,7 @@ impl DispatchHandler<Record> for ProgressActor {
         &mut self,
         message: Record,
         _scope: &mut ActorScope<Self>,
-    ) -> impl loac::IntoReply<Self, Record> + use<> {
+    ) -> impl loac::IntoReply<Self, Record> {
         lock(&self.log).push(message.0);
         ().ready()
     }
@@ -52,38 +52,20 @@ struct InterleavedSequence {
 #[message(reply = u8)]
 struct ThenSequence;
 
-impl DispatchHandler<ThenSequence> for ProgressActor {
-    fn handle(
-        &mut self,
-        _message: ThenSequence,
-        _scope: &mut ActorScope<Self>,
-    ) -> impl loac::IntoReply<Self, ThenSequence> + use<> {
-        async { 1_u8 }
-            .into_actor()
-            .then(|value, actor: &mut Self, _scope| {
-                lock(&actor.log).push("then");
-                async move { value + 1 }.into_actor()
-            })
-            .interleaved()
+impl Handler<ThenSequence> for ProgressActor {
+    async fn handle(_message: ThenSequence, mut cx: Cx<'_, Self>) -> u8 {
+        let value = async { 1_u8 }.await;
+        cx.with(|actor, _| lock(&actor.log).push("then"));
+        value + 1
     }
 }
 
-impl DispatchHandler<InterleavedSequence> for ProgressActor {
-    fn handle(
-        &mut self,
-        message: InterleavedSequence,
-        _scope: &mut ActorScope<Self>,
-    ) -> impl loac::IntoReply<Self, InterleavedSequence> + use<> {
-        lock(&self.log).push("interleaved-start");
+impl Handler<InterleavedSequence> for ProgressActor {
+    async fn handle(message: InterleavedSequence, mut cx: Cx<'_, Self>) {
+        cx.with(|actor, _| lock(&actor.log).push("interleaved-start"));
         let _ = message.started.send(());
-        async move {
-            let _ = message.release.await;
-        }
-        .into_actor()
-        .map(|(), actor: &mut Self, _scope| {
-            lock(&actor.log).push("interleaved-finish");
-        })
-        .interleaved()
+        let _ = message.release.await;
+        cx.with(|actor, _| lock(&actor.log).push("interleaved-finish"));
     }
 }
 

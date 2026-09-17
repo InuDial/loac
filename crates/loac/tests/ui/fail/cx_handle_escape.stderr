@@ -1,0 +1,16 @@
+error[E0521]: borrowed data escapes outside of function
+  --> tests/ui/fail/cx_handle_escape.rs:15:5
+   |
+14 |   fn escape(cx: Cx<'_, Worker>) {
+   |             --
+   |             |
+   |             `cx` is a reference that is only valid in the function body
+   |             has type `loac::Cx<'1, Worker>`
+15 | /     tokio::spawn(async move {
+16 | |         let mut cx = cx;
+17 | |         cx.with(|_actor, _scope| ());
+18 | |     });
+   | |      ^
+   | |      |
+   | |______`cx` escapes the function body here
+   |        argument requires that `'1` must outlive `'static`

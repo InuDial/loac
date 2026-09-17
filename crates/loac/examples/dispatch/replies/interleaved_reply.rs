@@ -1,6 +1,6 @@
-//! Builds a dispatch-handler cx future on the interleaved lane.
+//! Builds a handler cx future on the interleaved lane.
 //!
-//! `scope.cx_reply` pairs `Cx::with` access with interleaved scheduling:
+//! `Handler` pairs `Cx::with` access with interleaved scheduling:
 //! the actor task polls the returned future fairly with mailbox work, so a
 //! waiting reply does not block `Read` from making progress.
 
@@ -25,23 +25,15 @@ struct AddAfter {
     resume: oneshot::Receiver<()>,
 }
 
-impl DispatchHandler<AddAfter> for Counter {
-    fn handle(
-        &mut self,
-        message: AddAfter,
-        scope: &mut ActorScope<Self>,
-    ) -> impl IntoReply<Self, AddAfter> + use<> {
-        scope.cx_reply(self, move |mut cx| {
-            Box::pin(async move {
-                message
-                    .resume
-                    .await
-                    .expect("the example retains the resume sender");
-                cx.with(|actor, _| {
-                    actor.0 += message.amount;
-                    actor.0
-                })
-            })
+impl Handler<AddAfter> for Counter {
+    async fn handle(message: AddAfter, mut cx: Cx<'_, Self>) -> u64 {
+        message
+            .resume
+            .await
+            .expect("the example retains the resume sender");
+        cx.with(|actor, _| {
+            actor.0 += message.amount;
+            actor.0
         })
     }
 }
@@ -55,7 +47,7 @@ impl DispatchHandler<Read> for Counter {
         &mut self,
         _message: Read,
         _scope: &mut ActorScope<Self>,
-    ) -> impl IntoReply<Self, Read> + use<> {
+    ) -> impl IntoReply<Self, Read> {
         self.0.ready()
     }
 }

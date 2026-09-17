@@ -55,7 +55,7 @@ impl DispatchHandler<InitPing> for NeverReadyInit {
         &mut self,
         _message: InitPing,
         _scope: &mut ActorScope<'_, Self>,
-    ) -> impl loac::IntoReply<Self, InitPing> + use<> {
+    ) -> impl loac::IntoReply<Self, InitPing> {
         ().ready()
     }
 }
@@ -158,7 +158,7 @@ impl DispatchHandler<InitPing> for InitChild {
         &mut self,
         _message: InitPing,
         _scope: &mut ActorScope<'_, Self>,
-    ) -> impl loac::IntoReply<Self, InitPing> + use<> {
+    ) -> impl loac::IntoReply<Self, InitPing> {
         ().ready()
     }
 }
@@ -284,7 +284,7 @@ impl DispatchHandler<InitPing> for PanicInit {
         &mut self,
         _message: InitPing,
         _scope: &mut ActorScope<'_, Self>,
-    ) -> impl loac::IntoReply<Self, InitPing> + use<> {
+    ) -> impl loac::IntoReply<Self, InitPing> {
         ().ready()
     }
 }

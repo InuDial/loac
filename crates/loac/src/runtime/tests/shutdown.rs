@@ -42,20 +42,12 @@ async fn committed_kill_prevents_a_graceful_child_request() {
     let mut scope = scope_state(&inner);
     let child_ref = ActorRef::new(Arc::clone(&child));
     scope.children.insert_ref(&child_ref);
-    let mut actor = TestActor;
     let actor_ref = actor_ref(&inner);
+    let mut access = ActorAccess::new(actor_ref, TestActor, scope);
 
     assert_eq!(control.request(Shutdown::Kill), ShutdownStatus::Requested);
     assert!(matches!(
-        graceful_finish(
-            &mut actor,
-            &actor_ref,
-            &mut scope,
-            control,
-            Shutdown::Stop,
-            ExitReason::Stopped,
-        )
-        .await,
+        graceful_finish(&mut access, control, Shutdown::Stop, ExitReason::Stopped,).await,
         Work::Killed
     ));
     assert_eq!(child.control.mode(), Mode::Running);
@@ -73,7 +65,7 @@ fn truncated_reply_sweep_yields_before_ready_mailbox() {
     let (inner, mut inbox) = test_actor_inner(1);
     enqueue_test_envelope(&inner, CountEnvelope(Arc::clone(&mailbox_dispatches)));
 
-    let mut scope = scope_state(&inner);
+    let scope = scope_state(&inner);
     let owned = OwnedTasks::new(Arc::clone(&inner));
     let options = <TestActor as ActorConfig>::Options::default()
         .with_max_in_flight(NonZeroUsize::new(REPLIES).unwrap());
@@ -82,23 +74,20 @@ fn truncated_reply_sweep_yields_before_ready_mailbox() {
         let replies_polled = Arc::clone(&replies_polled);
         scheduler.__push_interleaved(
             Seal,
-            async move {
+            ScheduledFuture::test(async move {
                 replies_polled.fetch_add(1, Ordering::SeqCst);
-            }
-            .into_actor(),
+            }),
         );
     }
-    let mut actor = TestActor;
     let actor_ref = actor_ref(&inner);
+    let mut access = ActorAccess::new(actor_ref, TestActor, scope);
     // Start at replies. The old path continued to the ready mailbox.
     scheduler.state().cursor = InterleavedLane::Interleaved;
     let mut task = Context::from_waker(Waker::noop());
 
     {
         let mut turn = std::pin::pin!(actor_turn(
-            &mut actor,
-            &actor_ref,
-            &mut scope,
+            &mut access,
             &mut inbox,
             &inner,
             &owned,
@@ -124,7 +113,7 @@ async fn drain_priority_precedes_owned_completion() {
     let control = &inner.control;
     assert_eq!(control.request(Shutdown::Drain), ShutdownStatus::Requested);
 
-    let mut scope = scope_state(&inner);
+    let scope = scope_state(&inner);
     let child = ChildId::invalid_for_test();
     scope.children.publish(ChildExit::new(
         child,
@@ -136,14 +125,12 @@ async fn drain_priority_precedes_owned_completion() {
     let options =
         <TestActor as ActorConfig>::Options::default().with_max_in_flight(NonZeroUsize::MIN);
     let (_, _, mut scheduler) = TestActor::open(&options);
-    let mut actor = TestActor;
     let actor_ref = actor_ref(&inner);
+    let mut access = ActorAccess::new(actor_ref, TestActor, scope);
 
     assert!(matches!(
         drain_turn(
-            &mut actor,
-            &actor_ref,
-            &mut scope,
+            &mut access,
             &mut inbox,
             &inner,
             &owned,
@@ -155,9 +142,7 @@ async fn drain_priority_precedes_owned_completion() {
     ));
 
     let turn = drain_turn(
-        &mut actor,
-        &actor_ref,
-        &mut scope,
+        &mut access,
         &mut inbox,
         &inner,
         &owned,
@@ -172,9 +157,7 @@ async fn drain_priority_precedes_owned_completion() {
 
     assert!(matches!(
         drain_turn(
-            &mut actor,
-            &actor_ref,
-            &mut scope,
+            &mut access,
             &mut inbox,
             &inner,
             &owned,
@@ -216,6 +199,8 @@ async fn child_kill_commits_before_actor_work_is_dropped() {
     let options =
         <TestActor as ActorConfig>::Options::default().with_max_in_flight(NonZeroUsize::MIN);
     let (_, _, mut scheduler) = TestActor::open(&options);
+    let actor_ref = actor_ref(&inner);
+    let mut access = ActorAccess::new(actor_ref, TestActor, scope);
     owned.spawn(ChildKillDropProbe {
         child: child_inner,
         observed_kill: Arc::clone(&active_observed_kill),
@@ -223,7 +208,7 @@ async fn child_kill_commits_before_actor_work_is_dropped() {
 
     assert_eq!(
         kill_actor(
-            &mut scope,
+            &mut access,
             &mut inbox,
             &inner.control,
             &owned,

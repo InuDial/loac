@@ -105,13 +105,13 @@ async fn dequeued_child_exit_keeps_registration_until_handled() {
     let event = std::future::poll_fn(|task| state.poll_child_exit(task)).await;
     assert_eq!(state.children.len(), 1);
 
-    let mut actor = CountChildExit(Arc::clone(&observed));
     let actor_ref = actor_ref(&inner);
+    let mut access = ActorAccess::new(actor_ref, CountChildExit(Arc::clone(&observed)), state);
     assert!(matches!(
-        handle_child_exit(&mut actor, &actor_ref, &mut state, event, control).await,
+        handle_child_exit(&mut access, event, control).await,
         Work::Complete(())
     ));
-    assert_eq!(state.children.len(), 0);
+    assert_eq!(access.state().children.len(), 0);
     assert_eq!(observed.load(Ordering::SeqCst), 1);
 }
 
@@ -136,14 +136,12 @@ async fn graceful_cutoff_absorbs_a_dequeued_child_exit() {
         let mut scope = scope_state(&inner);
         let child_ref = ActorRef::new(Arc::clone(&child));
         let child_id = scope.children.insert_ref(&child_ref);
-        let mut actor = CountChildExit(Arc::clone(&observed));
         let actor_ref = actor_ref(&inner);
+        let mut access = ActorAccess::new(actor_ref, CountChildExit(Arc::clone(&observed)), scope);
         assert_eq!(control.request(shutdown), ShutdownStatus::Requested);
         assert!(matches!(
             handle_child_exit(
-                &mut actor,
-                &actor_ref,
-                &mut scope,
+                &mut access,
                 ChildExit::new(
                     child_id,
                     ExitStatus::new(ExitReason::Stopped, SubtreeStatus::Unconfirmed),
@@ -154,9 +152,9 @@ async fn graceful_cutoff_absorbs_a_dequeued_child_exit() {
             Work::Complete(())
         ));
         assert_eq!(observed.load(Ordering::SeqCst), 0);
-        assert_eq!(scope.children.len(), 0);
+        assert_eq!(access.state().children.len(), 0);
         assert_eq!(
-            scope.children.terminal_status(strong),
+            access.state().children.terminal_status(strong),
             ExitStatus::new(strong, SubtreeStatus::Unconfirmed)
         );
     }
@@ -179,20 +177,22 @@ async fn admitted_child_exit_hook_finishes_across_graceful_cutoff() {
         let mut scope = scope_state(&inner);
         let child_ref = ActorRef::new(Arc::clone(&child));
         let child_id = scope.children.insert_ref(&child_ref);
-        let mut actor = ControlledChildExit {
-            entered: Some(entered_tx),
-            release: Some(release_rx),
-            completed: Some(completed_tx),
-        };
         let controller = ActorRef::new(Arc::clone(&inner));
         let actor_ref = actor_ref(&inner);
+        let mut access = ActorAccess::new(
+            actor_ref,
+            ControlledChildExit {
+                entered: Some(entered_tx),
+                release: Some(release_rx),
+                completed: Some(completed_tx),
+            },
+            scope,
+        );
 
         let (work, ()) = tokio::time::timeout(Duration::from_secs(1), async {
             tokio::join!(
                 handle_child_exit(
-                    &mut actor,
-                    &actor_ref,
-                    &mut scope,
+                    &mut access,
                     ChildExit::new(
                         child_id,
                         ExitStatus::new(ExitReason::Stopped, SubtreeStatus::Terminated),
@@ -214,6 +214,6 @@ async fn admitted_child_exit_hook_finishes_across_graceful_cutoff() {
 
         assert!(matches!(work, Work::Complete(())));
         completed_rx.await.unwrap();
-        assert_eq!(scope.children.len(), 0);
+        assert_eq!(access.state().children.len(), 0);
     }
 }

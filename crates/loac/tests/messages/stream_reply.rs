@@ -1,7 +1,7 @@
 use futures_util::StreamExt;
 use loac::{
-    Actor, ActorScope, DispatchHandler, ExitReason, InterleavedFutureExt, IntoActorFuture, Message,
-    ReplyExt, Shutdown, StreamKind, Writer, actor,
+    Actor, ActorScope, Cx, DispatchHandler, ExitReason, InterleavedFutureExt, Message, ReplyExt,
+    Shutdown, StreamHandler, StreamKind, StreamOut, Writer, actor,
 };
 
 use super::support::watchdog;
@@ -26,7 +26,7 @@ impl DispatchHandler<StreamNumbers, StreamKind> for StreamActor {
         &mut self,
         message: StreamNumbers,
         _scope: &mut ActorScope<'_, Self>,
-    ) -> impl loac::IntoReply<Self, StreamNumbers> + use<> {
+    ) -> impl loac::IntoReply<Self, StreamNumbers> {
         let (item_tx, item_rx) = tokio::sync::mpsc::channel::<u8>(8);
         let (final_tx, final_rx) = tokio::sync::oneshot::channel::<u8>();
         let strategy = async move {
@@ -44,7 +44,7 @@ impl DispatchHandler<StreamNumbers, StreamKind> for StreamActor {
 
 struct ExclusiveStreamActor;
 
-#[actor(mailbox)]
+#[actor(mailbox, interleaved)]
 impl Actor for ExclusiveStreamActor {
     type SpawnArgs = ();
 
@@ -57,26 +57,22 @@ impl Actor for ExclusiveStreamActor {
 #[message(stream = u8, reply = u8)]
 struct ExclusiveStreamNumbers(u8);
 
-impl DispatchHandler<ExclusiveStreamNumbers, StreamKind> for ExclusiveStreamActor {
-    fn handle(
-        &mut self,
+impl StreamHandler<ExclusiveStreamNumbers> for ExclusiveStreamActor {
+    async fn handle<'a, W>(
         message: ExclusiveStreamNumbers,
-        _scope: &mut ActorScope<'_, Self>,
-    ) -> impl loac::IntoReply<Self, ExclusiveStreamNumbers> + use<> {
-        let (item_tx, item_rx) = tokio::sync::mpsc::channel::<u8>(8);
-        let (final_tx, final_rx) = tokio::sync::oneshot::channel::<u8>();
-        let strategy = async move {
-            let mut out = item_tx;
-            for item in 0..message.0 {
-                if out.write(item).await.is_err() {
-                    break;
-                }
+        mut out: StreamOut<'a, W>,
+        mut cx: Cx<'a, Self>,
+    ) -> u8
+    where
+        W: Writer<u8> + Send + 'a,
+    {
+        let _guard = cx.exclusive();
+        for item in 0..message.0 {
+            if out.write(item).await.is_err() {
+                break;
             }
-            message.0
         }
-        .into_actor()
-        .exclusive();
-        loac::StreamDispatch::new(strategy, item_rx, final_tx, final_rx)
+        message.0
     }
 }
 
@@ -100,7 +96,7 @@ impl DispatchHandler<InterleavedStreamNumbers, StreamKind> for InterleavedStream
         &mut self,
         message: InterleavedStreamNumbers,
         _scope: &mut ActorScope<'_, Self>,
-    ) -> impl loac::IntoReply<Self, InterleavedStreamNumbers> + use<> {
+    ) -> impl loac::IntoReply<Self, InterleavedStreamNumbers> {
         let (item_tx, item_rx) = tokio::sync::mpsc::channel::<u8>(8);
         let (final_tx, final_rx) = tokio::sync::oneshot::channel::<u8>();
         let strategy = async move {
@@ -112,7 +108,6 @@ impl DispatchHandler<InterleavedStreamNumbers, StreamKind> for InterleavedStream
             }
             message.0
         }
-        .into_actor()
         .interleaved();
         loac::StreamDispatch::new(strategy, item_rx, final_tx, final_rx)
     }
@@ -138,7 +133,7 @@ impl DispatchHandler<BranchStream, StreamKind> for BranchStreamActor {
         &mut self,
         message: BranchStream,
         _scope: &mut ActorScope<'_, Self>,
-    ) -> impl loac::IntoReply<Self, BranchStream> + use<> {
+    ) -> impl loac::IntoReply<Self, BranchStream> {
         let (item_tx, item_rx) = tokio::sync::mpsc::channel::<u8>(8);
         let (final_tx, final_rx) = tokio::sync::oneshot::channel::<u8>();
         let strategy = if message.0 == 0 {

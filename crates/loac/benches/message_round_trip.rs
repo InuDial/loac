@@ -11,7 +11,7 @@ use std::{
 
 use criterion::{Criterion, Throughput, criterion_group, criterion_main};
 use loac::{
-    Actor, ActorRef, ActorScope, DispatchHandler, InterleavedFutureExt, IntoActorFuture, Message,
+    Actor, ActorRef, ActorScope, Cx, DispatchHandler, Handler, InterleavedFutureExt, Message,
     ReplyExt, Shutdown,
 };
 
@@ -46,7 +46,7 @@ impl DispatchHandler<Ready> for ReplyActor {
         &mut self,
         _message: Ready,
         _scope: &mut ActorScope<Self>,
-    ) -> impl loac::IntoReply<Self, Ready> + use<> {
+    ) -> impl loac::IntoReply<Self, Ready> {
         1.ready()
     }
 }
@@ -60,7 +60,7 @@ impl DispatchHandler<Owned> for ReplyActor {
         &mut self,
         _message: Owned,
         _scope: &mut ActorScope<Self>,
-    ) -> impl loac::IntoReply<Self, Owned> + use<> {
+    ) -> impl loac::IntoReply<Self, Owned> {
         std::future::ready(1)
     }
 }
@@ -74,8 +74,8 @@ impl DispatchHandler<Interleaved> for ReplyActor {
         &mut self,
         _message: Interleaved,
         _scope: &mut ActorScope<Self>,
-    ) -> impl loac::IntoReply<Self, Interleaved> + use<> {
-        std::future::ready(1).into_actor().interleaved()
+    ) -> impl loac::IntoReply<Self, Interleaved> {
+        std::future::ready(1).interleaved()
     }
 }
 
@@ -84,8 +84,8 @@ impl DispatchHandler<Interleaved> for UnboundedReplyActor {
         &mut self,
         _message: Interleaved,
         _scope: &mut ActorScope<Self>,
-    ) -> impl loac::IntoReply<Self, Interleaved> + use<> {
-        std::future::ready(1).into_actor().interleaved()
+    ) -> impl loac::IntoReply<Self, Interleaved> {
+        std::future::ready(1).interleaved()
     }
 }
 
@@ -93,13 +93,10 @@ impl DispatchHandler<Interleaved> for UnboundedReplyActor {
 #[message(reply = u64)]
 struct Exclusive;
 
-impl DispatchHandler<Exclusive> for ReplyActor {
-    fn handle(
-        &mut self,
-        _message: Exclusive,
-        _scope: &mut ActorScope<Self>,
-    ) -> impl loac::IntoReply<Self, Exclusive> + use<> {
-        std::future::ready(1).into_actor().exclusive()
+impl Handler<Exclusive> for ReplyActor {
+    async fn handle(_message: Exclusive, mut cx: Cx<'_, Self>) -> u64 {
+        let _guard = cx.exclusive();
+        1
     }
 }
 

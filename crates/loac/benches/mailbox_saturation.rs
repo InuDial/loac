@@ -39,7 +39,7 @@ impl DispatchHandler<ReadyTraffic> for MailboxActor {
         &mut self,
         _message: ReadyTraffic,
         _scope: &mut ActorScope<Self>,
-    ) -> impl loac::IntoReply<Self, ReadyTraffic> + use<> {
+    ) -> impl loac::IntoReply<Self, ReadyTraffic> {
         ().ready()
     }
 }

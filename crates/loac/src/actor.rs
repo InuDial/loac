@@ -1,4 +1,4 @@
-use std::{future::Future, pin::Pin};
+use std::future::Future;
 
 use tokio::sync::{mpsc, oneshot};
 
@@ -7,7 +7,7 @@ use crate::{
     access::Cx,
     config::SupervisionConfig,
     reply::{CxReply, CxStream, IntoReply, SingleKind, StreamDispatch, StreamKind, StreamMessage},
-    scheduling::{InterleavedScheduler, ReplyScheduler, SchedulerProfile},
+    scheduling::{InterleavedScheduler, SchedulerProfile},
     transport::{MessageConfig, MessageInbox, MessageSender, RuntimeInbox},
 };
 
@@ -119,6 +119,8 @@ pub trait Actor:
     /// once, when the actor loop observes the graceful shutdown mode. It runs
     /// before already-dispatched replies are drained, so the actor can cancel
     /// background loops or signal them to exit at their next turn boundary.
+    /// It may therefore observe state while an [`ExclusiveGuard`](crate::ExclusiveGuard)
+    /// remains held. The hook must tolerate that transaction boundary.
     ///
     /// Kill, panic, abort, and executor cancellation never call this hook. A
     /// panic inside the hook fails the actor.
@@ -230,7 +232,7 @@ pub trait HasMailbox:
     + MessageConfig<
         Sender: MessageSender<Self>,
         Inbox: MessageInbox<Self>,
-        Scheduler: ReplyScheduler<Self>,
+        Scheduler: SchedulerProfile<Self>,
     >
 {
 }
@@ -243,7 +245,7 @@ where
     A: Actor,
     A::Sender: MessageSender<A>,
     A::Inbox: MessageInbox<A>,
-    A::Scheduler: ReplyScheduler<A>,
+    A::Scheduler: SchedulerProfile<A>,
 {
 }
 
@@ -334,8 +336,8 @@ pub trait HasReply: Message {}
 /// Implement this trait directly as the advanced escape hatch when a handler
 /// must choose among [`IntoReply`] strategies such as
 /// [`ReplyExt::ready`](crate::ReplyExt::ready),
-/// [`ReplyExt::exclusive`](crate::ReplyExt::exclusive), a bare future, or
-/// [`Either`](crate::reply::Either). Prefer [`Handler`] when an `async fn`
+/// a bare future, or [`Either`](crate::reply::Either).
+/// Prefer [`Handler`] when an `async fn`
 /// with [`Cx`] is enough, and [`SyncHandler`] when the reply is already
 /// complete.
 pub trait DispatchHandler<M: Message, K: crate::reply::ReplyKind = SingleKind>: HasMailbox {
@@ -343,7 +345,7 @@ pub trait DispatchHandler<M: Message, K: crate::reply::ReplyKind = SingleKind>: 
     ///
     /// The runtime calls this method after the request commits to dispatch.
     /// Configured interleaved capacity must also permit dispatch.
-    /// No exclusive reply may block actor work.
+    /// An active scheduler lease may block actor work.
     /// The function runs to completion inside one actor
     /// turn: Kill cannot interrupt it, and abandoning the caller's response does
     /// not roll back effects that occur here. A panic is contained, fails this
@@ -354,36 +356,15 @@ pub trait DispatchHandler<M: Message, K: crate::reply::ReplyKind = SingleKind>: 
     /// and is selected automatically when the message implements
     /// [`StreamMessage`](crate::reply::StreamMessage).
     ///
-    /// The precise `use<Self, M, K>` capture list excludes the lifetimes of this
-    /// invocation's `&mut self` and `scope` borrows. A returned asynchronous reply
-    /// must therefore own everything it keeps across polls, such as a moved
-    /// message or a cloned handle. It cannot carry either mutable borrow beyond
-    /// this call. Use [`reply::Either`](crate::reply::Either) for runtime branching.
-    /// Both branches must have statically known reply strategies.
-    ///
-    /// This helper compiles because the returned reply cannot capture either input
-    /// borrow:
-    ///
-    /// ```
-    /// use loac::{ActorScope, DispatchHandler, IntoReply, Message};
-    ///
-    /// fn detach_reply<A, M>(
-    ///     actor: &mut A,
-    ///     message: M,
-    ///     scope: &mut ActorScope<'_, A>,
-    /// ) -> impl IntoReply<A, M> + use<A, M>
-    /// where
-    ///     A: DispatchHandler<M>,
-    ///     M: Message,
-    /// {
-    ///     actor.handle(message, scope)
-    /// }
-    /// ```
-    fn handle(
-        &mut self,
+    /// The result remains tied to this dispatch invocation.
+    /// The runtime consumes it before releasing either borrow.
+    /// Asynchronous strategies must still own their ordinary data.
+    /// Use [`reply::Either`](crate::reply::Either) for runtime branching.
+    fn handle<'a>(
+        &'a mut self,
         message: M,
-        scope: &mut ActorScope<'_, Self>,
-    ) -> impl IntoReply<Self, M> + use<Self, M, K>;
+        scope: &'a mut ActorScope<'_, Self>,
+    ) -> impl IntoReply<Self, M> + 'a;
 }
 
 /// Handles one message with an actor-access `cx` future.
@@ -422,37 +403,30 @@ pub trait DispatchHandler<M: Message, K: crate::reply::ReplyKind = SingleKind>: 
 ///     }
 /// }
 /// ```
-pub trait Handler<M: Message>: HasMailbox {
+pub trait Handler<M: Message>: HasInterleaving {
     /// Starts handling `message` and returns the reply-producing future.
     ///
-    /// The future is polled on the actor's interleaved lane. `cx` provides
-    /// temporary synchronous actor and scope access.
+    /// The runtime invokes this method during its first scheduled poll.
+    /// The actor's interleaved lane polls this future.
+    /// `cx` provides temporary synchronous actor and scope access.
     fn handle(message: M, cx: Cx<'_, Self>) -> impl Future<Output = M::Reply> + Send + '_;
 }
 
-#[allow(unsafe_code)]
 impl<A, M> DispatchHandler<M, SingleKind> for A
 where
     A: Handler<M> + HasInterleaving,
     M: Message<Kind = SingleKind>,
 {
-    fn handle(
-        &mut self,
+    fn handle<'a>(
+        &'a mut self,
         message: M,
-        scope: &mut ActorScope<'_, Self>,
-    ) -> impl IntoReply<Self, M> + use<A, M> {
-        let cx = Cx::new(self, scope);
-        let future = Box::pin(<A as Handler<M>>::handle(message, cx))
-            as Pin<Box<dyn Future<Output = M::Reply> + Send + '_>>;
-        // SAFETY: `Cx` carries shared address and phantom mutable access.
-        // The runtime polls this reply only on its actor task.
-        // It drops the reply before actor, address, or scope teardown.
-        let future: Pin<Box<dyn Future<Output = M::Reply> + Send + 'static>> =
-            unsafe { std::mem::transmute(future) };
-        CxReply {
-            future,
-            _actor: std::marker::PhantomData,
-        }
+        scope: &'a mut ActorScope<'_, Self>,
+    ) -> impl IntoReply<Self, M> + 'a {
+        let (cx, lease) = Cx::new(self, scope);
+        // Dispatch still owns its exclusive actor borrow.
+        // Defer user construction until the first scheduled poll.
+        let future = async move { <A as Handler<M>>::handle(message, cx).await };
+        CxReply::new(future, lease)
     }
 }
 
@@ -481,12 +455,13 @@ pub trait SyncHandler<M: Message>: HasMailbox {
 /// `out` is the runtime-created item writer wrapped in [`StreamOut`]. The
 /// wrapper ties the writer to the handler future's borrow, so it cannot be
 /// moved into a `'static` task; dropping it closes the caller's item stream.
-pub trait StreamHandler<M>: HasMailbox
+pub trait StreamHandler<M>: HasInterleaving
 where
     M: StreamMessage,
 {
     /// Starts producing stream items and returns the final reply future.
     ///
+    /// The runtime invokes this method during its first scheduled poll.
     /// `cx` provides temporary synchronous actor and scope access.
     fn handle<'a, W>(
         message: M,
@@ -497,32 +472,24 @@ where
         W: Writer<M::Item> + Send + 'a;
 }
 
-#[allow(unsafe_code)]
 impl<A, M> DispatchHandler<M, StreamKind> for A
 where
     A: StreamHandler<M> + HasInterleaving,
     M: StreamMessage,
 {
-    fn handle(
-        &mut self,
+    fn handle<'a>(
+        &'a mut self,
         message: M,
-        scope: &mut ActorScope<'_, Self>,
-    ) -> impl IntoReply<Self, M> + use<A, M> {
+        scope: &'a mut ActorScope<'_, Self>,
+    ) -> impl IntoReply<Self, M> + 'a {
         let (item_tx, item_rx) = mpsc::channel::<M::Item>(8);
         let (final_tx, final_rx) = oneshot::channel::<M::Final>();
-        let cx = Cx::new(self, scope);
+        let (cx, lease) = Cx::new(self, scope);
         let out = StreamOut::new(item_tx);
-        let future = Box::pin(<A as StreamHandler<M>>::handle(message, out, cx))
-            as Pin<Box<dyn Future<Output = M::Final> + Send + '_>>;
-        // SAFETY: the lifetime covers `Cx` access and `StreamOut` ownership.
-        // The runtime polls this reply only on its actor task.
-        // It drops the reply before actor, address, or scope teardown.
-        let future: Pin<Box<dyn Future<Output = M::Final> + Send + 'static>> =
-            unsafe { std::mem::transmute(future) };
-        let strategy = CxStream {
-            future,
-            _actor: std::marker::PhantomData,
-        };
+        // Dispatch still owns its exclusive actor borrow.
+        // Defer user construction until the first scheduled poll.
+        let future = async move { <A as StreamHandler<M>>::handle(message, out, cx).await };
+        let strategy = CxStream::new(future, lease);
         StreamDispatch::new(strategy, item_rx, final_tx, final_rx)
     }
 }

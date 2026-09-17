@@ -26,7 +26,7 @@ impl DispatchHandler<Lookup> for Store {
         &mut self,
         message: Lookup,
         _scope: &mut ActorScope<Self>,
-    ) -> impl IntoReply<Self, Lookup> + use<> {
+    ) -> impl IntoReply<Self, Lookup> {
         if let Some(&value) = self.cache.get(&message.0) {
             reply::Either::Left(value.ready())
         } else {

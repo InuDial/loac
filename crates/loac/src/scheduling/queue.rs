@@ -10,12 +10,9 @@ use std::{
 
 use futures_util::task::AtomicWaker;
 
-use crate::{
-    Actor, ActorScope,
-    mailbox::{Control, Mode},
-};
+use crate::mailbox::{Control, Mode};
 
-use super::{ErasedActorFuture, drop_without_unwind};
+use super::{ScheduledFuture, drop_without_unwind};
 
 const ACTIVE_POLL_BUDGET: usize = 16;
 
@@ -26,18 +23,20 @@ pub(super) enum InterleavedPoll {
     Pending,
     /// A reply completed or lifecycle changed.
     Progress,
+    /// One reply holds the scheduler lease.
+    Leased,
     /// The budget ended before the current sweep finished.
     ///
     /// The caller must stop polling ready lanes and return [`Poll::Pending`].
     BudgetExhausted,
 }
 
-pub(super) struct Queue<A: Actor> {
-    items: VecDeque<ErasedActorFuture<A>>,
+pub(super) struct Queue {
+    items: VecDeque<ScheduledFuture>,
     sweep: SweepState,
 }
 
-impl<A: Actor> Queue<A> {
+impl Queue {
     pub(super) fn new() -> Self {
         Self {
             items: VecDeque::new(),
@@ -53,27 +52,72 @@ impl<A: Actor> Queue<A> {
         self.items.is_empty()
     }
 
-    pub(super) fn push(&mut self, future: ErasedActorFuture<A>) {
+    pub(super) fn push(&mut self, future: ScheduledFuture) {
+        // Lease acquisition happens only while polling a queued future.
         self.items.push_back(future);
         self.sweep.restart();
     }
 
+    pub(super) fn is_leased(&self) -> bool {
+        self.items.front().is_some_and(ScheduledFuture::is_leased)
+    }
+
     pub(super) fn poll(
         &mut self,
-        actor: &mut A,
-        scope: &mut ActorScope<'_, A>,
         control: &Control,
         expected_mode: Mode,
         task: &mut Context<'_>,
     ) -> InterleavedPoll {
+        if self.is_leased() {
+            return self.poll_leased(control, expected_mode, task);
+        }
         poll_round_robin(
             &mut self.items,
             &mut self.sweep,
             control,
             expected_mode,
             task,
-            |future, task| future.as_mut().poll(actor, scope, task),
+            ScheduledFuture::poll,
+            ScheduledFuture::is_leased,
         )
+    }
+
+    fn poll_leased(
+        &mut self,
+        control: &Control,
+        expected_mode: Mode,
+        task: &mut Context<'_>,
+    ) -> InterleavedPoll {
+        let wake = self
+            .sweep
+            .wake
+            .get_or_insert_with(|| Arc::new(SweepWaker::default()));
+        wake.register(task.waker());
+        let item_waker = Waker::from(Arc::clone(wake));
+        let mut item_task = Context::from_waker(&item_waker);
+        let result = self
+            .items
+            .front_mut()
+            .expect("a leased queue retains its owner")
+            .poll(&mut item_task);
+        self.sweep.restart();
+        if control.mode() != expected_mode {
+            return InterleavedPoll::Progress;
+        }
+        if result.is_ready() {
+            let completed = self
+                .items
+                .pop_front()
+                .expect("the leased reply just completed");
+            control.drop_user_value(completed);
+            return InterleavedPoll::Progress;
+        }
+        if self.is_leased() {
+            InterleavedPoll::Leased
+        } else {
+            self.items.rotate_left(1);
+            InterleavedPoll::Progress
+        }
     }
 
     pub(super) fn clear(&mut self, control: &Control) {
@@ -84,7 +128,7 @@ impl<A: Actor> Queue<A> {
     }
 }
 
-impl<A: Actor> Drop for Queue<A> {
+impl Drop for Queue {
     fn drop(&mut self) {
         self.sweep.clear();
         while let Some(future) = self.items.pop_front() {
@@ -116,6 +160,7 @@ fn poll_round_robin<T>(
     expected_mode: Mode,
     task: &mut Context<'_>,
     mut poll: impl FnMut(&mut T, &mut Context<'_>) -> Poll<()>,
+    mut is_leased: impl FnMut(&T) -> bool,
 ) -> InterleavedPoll {
     if items.is_empty() {
         sweep.clear();
@@ -149,6 +194,10 @@ fn poll_round_robin<T>(
                 let completed_item = items.pop_front().expect("the front item was just polled");
                 control.drop_user_value(completed_item);
                 completed = true;
+            }
+            Poll::Pending if is_leased(&items[0]) => {
+                sweep.restart();
+                return InterleavedPoll::Leased;
             }
             Poll::Pending => items.rotate_left(1),
         }

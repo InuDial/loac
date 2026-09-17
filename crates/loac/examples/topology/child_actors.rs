@@ -30,7 +30,7 @@ impl DispatchHandler<Review> for Agent {
         &mut self,
         message: Review,
         _scope: &mut ActorScope<Self>,
-    ) -> impl loac::IntoReply<Self, Review> + use<> {
+    ) -> impl loac::IntoReply<Self, Review> {
         Report {
             agent: self.0,
             subject: message.0,
@@ -69,7 +69,7 @@ impl DispatchHandler<ReviewTask> for Team {
         &mut self,
         message: ReviewTask,
         _scope: &mut ActorScope<Self>,
-    ) -> impl IntoReply<Self, ReviewTask> + use<> {
+    ) -> impl IntoReply<Self, ReviewTask> {
         let [correctness, readability] = self.agents.clone();
 
         async move {

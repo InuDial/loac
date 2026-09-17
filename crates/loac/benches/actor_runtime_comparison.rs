@@ -63,7 +63,7 @@ impl DispatchHandler<Ready> for LoongActor {
         &mut self,
         _message: Ready,
         _scope: &mut ActorScope<Self>,
-    ) -> impl loac::IntoReply<Self, Ready> + use<> {
+    ) -> impl loac::IntoReply<Self, Ready> {
         1.ready()
     }
 }
@@ -73,7 +73,7 @@ impl DispatchHandler<Notify> for LoongActor {
         &mut self,
         _message: Notify,
         _scope: &mut ActorScope<Self>,
-    ) -> impl loac::IntoReply<Self, Notify> + use<> {
+    ) -> impl loac::IntoReply<Self, Notify> {
         self.handled += 1;
         ().ready()
     }
@@ -84,7 +84,7 @@ impl DispatchHandler<Barrier> for LoongActor {
         &mut self,
         _message: Barrier,
         _scope: &mut ActorScope<Self>,
-    ) -> impl loac::IntoReply<Self, Barrier> + use<> {
+    ) -> impl loac::IntoReply<Self, Barrier> {
         self.handled.ready()
     }
 }

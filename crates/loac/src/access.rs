@@ -1,73 +1,162 @@
 #![allow(unsafe_code)]
 
-//! Owned actor/scope access for borrow-free reply futures.
+//! Scoped actor access for ordinary reply futures.
 //!
-//! `Cx` is the unsafe capsule that lets a reply be a plain [`Future`]
-//! while still touching actor state inside synchronous scopes. The runtime
-//! creates one handle per reply and polls that reply only on the actor task,
-//! serially with every other actor-aware future and mailbox dispatch.
+//! `Cx` is the unsafe capsule for ordinary [`Future`] replies.
+//! It exposes actor state only within synchronous scopes.
+//! The runtime creates one handle per reply.
+//! The actor task polls that reply.
+//! No actor-aware operation overlaps another.
 
-use std::{marker::PhantomData, ops::Deref, ptr::NonNull};
+use std::{
+    marker::PhantomData,
+    ops::Deref,
+    sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+    },
+};
 
-use crate::{Actor, ActorRef, ActorScope, runtime::ScopeState};
+use crate::{Actor, ActorRef, ActorScope, runtime::CxTarget};
 
-/// Owned access handle used by [`Handler`](crate::Handler) and
-/// [`StreamHandler`](crate::StreamHandler) futures, and by the explicit
-/// [`ActorScope::cx_reply`] / [`ActorScope::cx_stream`] interleaved and
-/// [`ActorScope::cx_exclusive`] / [`ActorScope::cx_stream_exclusive`]
-/// exclusive constructors.
+/// Owned access handle for actor-aware reply futures.
 ///
-/// The handle carries a shared address borrow and phantom mutable lifetimes.
-/// Safe code cannot store it in a `'static` location. It is `Send` because the
-/// runtime polls its future only on the actor task. The raw pointers are never
-/// dereferenced concurrently. For address-only access, `Cx` derefs to
-/// [`ActorRef`] and exposes [`myself`](Self::myself).
+/// [`Handler`](crate::Handler) creates ordinary replies with this handle.
+/// [`StreamHandler`](crate::StreamHandler) does likewise for streams.
+/// The runtime polls each reply on its actor task.
+/// Safe code cannot erase the handle's dispatch lifetime.
+/// `Cx` dereferences to [`ActorRef`] for address operations.
 pub struct Cx<'a, A: Actor + 'a> {
-    actor: NonNull<A>,
-    state: NonNull<ScopeState<A>>,
-    actor_ref: &'a ActorRef<A>,
-    _lifetime: PhantomData<(&'a mut A, &'a mut ScopeState<A>)>,
+    target: CxTarget<A>,
+    lease: Arc<ReplyLease>,
+    _lifetime: PhantomData<&'a mut A>,
 }
 
-impl<A: Actor> Cx<'_, A> {
-    pub(crate) fn new<'a>(actor: &'a mut A, scope: &'a mut ActorScope<'_, A>) -> Cx<'a, A> {
-        Cx {
-            actor: NonNull::from(actor),
-            state: NonNull::from(&mut *scope.state),
-            actor_ref: scope.actor_ref,
-            _lifetime: PhantomData,
-        }
-    }
+/// Proves that one lease belongs to live actor storage.
+pub(crate) struct ScopedLease<'actor, A: Actor> {
+    lease: Arc<ReplyLease>,
+    _lifetime: PhantomData<&'actor A>,
+}
 
-    /// Runs `f` with temporary `&mut A` and [`ActorScope`] borrows.
-    ///
-    /// Use `_` for the borrow you do not need. The higher-ranked closure
-    /// signature prevents either borrow from escaping the call. Do not call
-    /// this from any task other than the actor task that owns the reply
-    /// future.
+/// Temporarily pauses scheduled actor work across await points.
+///
+/// The guard borrows its originating [`Cx`].
+/// It stores no actor or scope references.
+/// [`with`](Self::with) creates temporary actor access.
+/// Graceful [`Actor::on_shutdown`] may still run during the lease.
+#[must_use = "dropping the guard releases exclusive scheduling"]
+pub struct ExclusiveGuard<'cx, 'actor, A: Actor> {
+    cx: &'cx mut Cx<'actor, A>,
+}
+
+impl<A: Actor> ExclusiveGuard<'_, '_, A> {
+    /// Runs `f` with temporary actor and scope borrows.
     pub fn with<R>(
         &mut self,
         f: impl for<'a> FnOnce(&'a mut A, &'a mut ActorScope<'a, A>) -> R,
     ) -> R {
-        // SAFETY: the reply future is polled only on the actor task, serially
-        // with all other actor work. The two pointers were created from two
-        // non-overlapping mutable borrows (`&mut A` and `&mut ScopeState<A>`),
-        // so reconstructing them together preserves uniqueness.
-        let actor = unsafe { self.actor.as_mut() };
-        let state = unsafe { self.state.as_mut() };
-        let mut scope = state.actor_scope(self.actor_ref);
-        f(actor, &mut scope)
+        self.cx.with(f)
+    }
+
+    /// Returns this actor's non-owning address.
+    #[must_use]
+    pub fn myself(&self) -> &ActorRef<A> {
+        self.cx.myself()
+    }
+}
+
+pub(crate) struct ReplyLease {
+    held: AtomicBool,
+}
+
+impl ReplyLease {
+    pub(crate) fn new() -> Arc<Self> {
+        Arc::new(Self {
+            held: AtomicBool::new(false),
+        })
+    }
+
+    pub(crate) fn is_held(&self) -> bool {
+        self.held.load(Ordering::Acquire)
+    }
+
+    #[cfg(test)]
+    /// Acquires a queued lease without constructing a public guard.
+    pub(crate) fn acquire_for_test(&self) {
+        self.acquire();
+    }
+
+    fn acquire(&self) {
+        assert!(
+            !self.held.swap(true, Ordering::AcqRel),
+            "a Cx reply cannot hold nested exclusive guards"
+        );
+    }
+
+    fn release(&self) {
+        self.held.store(false, Ordering::Release);
+    }
+}
+
+impl<A: Actor> ScopedLease<'_, A> {
+    /// Consumes the witness after scheduler ownership becomes established.
+    pub(crate) fn into_inner(self) -> Arc<ReplyLease> {
+        self.lease
+    }
+}
+
+impl<'actor, A: Actor> Cx<'actor, A> {
+    /// Creates paired access and liveness proof for one dispatch.
+    pub(crate) fn new(
+        _actor: &'actor mut A,
+        scope: &'actor mut ActorScope<'_, A>,
+    ) -> (Cx<'actor, A>, ScopedLease<'actor, A>) {
+        let lease = ReplyLease::new();
+        let scoped_lease = ScopedLease {
+            lease: Arc::clone(&lease),
+            _lifetime: PhantomData,
+        };
+        let cx = Cx {
+            target: scope
+                .target
+                .expect("Cx requires stable running actor storage"),
+            lease,
+            _lifetime: PhantomData,
+        };
+        (cx, scoped_lease)
+    }
+
+    /// Runs `f` with temporary `&mut A` and [`ActorScope`] borrows.
+    ///
+    /// Use `_` for any unused borrow.
+    /// The closure prevents either borrow from escaping.
+    pub fn with<R>(
+        &mut self,
+        f: impl for<'a> FnOnce(&'a mut A, &'a mut ActorScope<'a, A>) -> R,
+    ) -> R {
+        // SAFETY: actor-aware polls never overlap.
+        // The runtime retains the pinned target cell.
+        unsafe { self.target.with(f) }
     }
 
     /// Returns this actor's non-owning address.
     ///
-    /// Unlike [`with`](Self::with), this does not open an actor or scope
-    /// borrow, so it is available whenever the `Cx` handle is. The returned
-    /// address is the same one [`ActorScope::myself`] would return inside
-    /// `with`.
+    /// This opens no actor or scope borrow.
     #[must_use]
     pub fn myself(&self) -> &ActorRef<A> {
-        self.actor_ref
+        // SAFETY: the runtime retains the pinned target cell.
+        unsafe { self.target.actor_ref() }
+    }
+
+    /// Pauses scheduled actor work until the returned guard drops.
+    ///
+    /// Acquisition is immediate during the current reply poll.
+    /// A retained guard pins this scheduler item.
+    /// Graceful [`Actor::on_shutdown`] may preempt this lease.
+    /// Use [`ExclusiveGuard::with`] for temporary state access.
+    pub fn exclusive<'cx>(&'cx mut self) -> ExclusiveGuard<'cx, 'actor, A> {
+        self.lease.acquire();
+        ExclusiveGuard { cx: self }
     }
 }
 
@@ -79,9 +168,12 @@ impl<A: Actor> Deref for Cx<'_, A> {
     }
 }
 
-// SAFETY: the runtime polls the owning future on the actor task. Actor and
-// scope mutations happen inside `with` while the actor task has exclusive
-// access; `myself` returns a separate shared actor-address borrow. The phantom
-// mutable lifetimes do not correspond to actual borrows that could race with
-// another thread.
+impl<A: Actor> Drop for ExclusiveGuard<'_, '_, A> {
+    fn drop(&mut self) {
+        self.cx.lease.release();
+    }
+}
+
+// SAFETY: only the actor task polls the owning future.
+// Every mutation occurs during one serialized poll.
 unsafe impl<A: Actor> Send for Cx<'_, A> {}

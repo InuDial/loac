@@ -3,7 +3,7 @@ use loac::Writer;
 
 struct CxExclusiveCounter(u8);
 
-#[actor(mailbox)]
+#[actor(mailbox, interleaved)]
 impl Actor for CxExclusiveCounter {
     type SpawnArgs = u8;
 
@@ -16,25 +16,18 @@ impl Actor for CxExclusiveCounter {
 #[message(reply = u8)]
 struct CxExclusiveIncrement;
 
-impl DispatchHandler<CxExclusiveIncrement> for CxExclusiveCounter {
-    fn handle(
-        &mut self,
-        _message: CxExclusiveIncrement,
-        scope: &mut ActorScope<Self>,
-    ) -> impl loac::IntoReply<Self, CxExclusiveIncrement> + use<> {
-        scope.cx_exclusive(self, |mut cx| {
-            Box::pin(async move {
-                cx.with(|actor, _| {
-                    actor.0 += 1;
-                    actor.0
-                })
-            })
+impl Handler<CxExclusiveIncrement> for CxExclusiveCounter {
+    async fn handle(_message: CxExclusiveIncrement, mut cx: Cx<'_, Self>) -> u8 {
+        let mut guard = cx.exclusive();
+        guard.with(|actor, _| {
+            actor.0 += 1;
+            actor.0
         })
     }
 }
 
 #[tokio::test]
-async fn cx_exclusive_runs_without_interleaving() {
+async fn cx_exclusive_guard_runs_on_the_interleaved_lane() {
     let owner = loac::spawn::<CxExclusiveCounter>(0);
     let actor = owner.actor_ref();
 
@@ -50,27 +43,23 @@ async fn cx_exclusive_runs_without_interleaving() {
 #[message(stream = u8, reply = u8)]
 struct CxExclusiveStream(u8);
 
-impl loac::DispatchHandler<CxExclusiveStream, loac::StreamKind> for CxExclusiveCounter {
-    fn handle(
-        &mut self,
+impl StreamHandler<CxExclusiveStream> for CxExclusiveCounter {
+    async fn handle<'a, W>(
         message: CxExclusiveStream,
-        scope: &mut ActorScope<Self>,
-    ) -> impl loac::IntoReply<Self, CxExclusiveStream> + use<> {
-        let (item_tx, item_rx) = tokio::sync::mpsc::channel::<u8>(8);
-        let (final_tx, final_rx) = tokio::sync::oneshot::channel::<u8>();
+        mut out: StreamOut<'a, W>,
+        mut cx: Cx<'a, Self>,
+    ) -> u8
+    where
+        W: Writer<u8> + Send + 'a,
+    {
+        let mut guard = cx.exclusive();
         let base = message.0;
-        let strategy = scope.cx_stream_exclusive(self, move |mut cx| {
-            Box::pin(async move {
-                let mut out = item_tx;
-                let doubled = cx.with(|actor, _| {
-                    actor.0 += base;
-                    actor.0 * 2
-                });
-                let _ = out.write(doubled).await;
-                doubled
-            })
+        let doubled = guard.with(|actor, _| {
+            actor.0 += base;
+            actor.0 * 2
         });
-        loac::StreamDispatch::new(strategy, item_rx, final_tx, final_rx)
+        let _ = out.write(doubled).await;
+        doubled
     }
 }
 

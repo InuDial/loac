@@ -25,7 +25,7 @@ impl DispatchHandler<Multiply> for Worker {
         &mut self,
         message: Multiply,
         _scope: &mut ActorScope<Self>,
-    ) -> impl loac::IntoReply<Self, Multiply> + use<> {
+    ) -> impl loac::IntoReply<Self, Multiply> {
         (self.factor * message.0).ready()
     }
 }

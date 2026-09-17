@@ -50,7 +50,7 @@ impl DispatchHandler<Query> for Left {
         &mut self,
         message: Query,
         _scope: &mut ActorScope<Self>,
-    ) -> impl loac::IntoReply<Self, Query> + use<> {
+    ) -> impl loac::IntoReply<Self, Query> {
         (message.0 + 1).ready()
     }
 }
@@ -60,7 +60,7 @@ impl DispatchHandler<Query> for Right {
         &mut self,
         message: Query,
         _scope: &mut ActorScope<Self>,
-    ) -> impl loac::IntoReply<Self, Query> + use<> {
+    ) -> impl loac::IntoReply<Self, Query> {
         (message.0 * 2).ready()
     }
 }
@@ -74,7 +74,7 @@ impl DispatchHandler<Notify> for Left {
         &mut self,
         message: Notify,
         _scope: &mut ActorScope<Self>,
-    ) -> impl loac::IntoReply<Self, Notify> + use<> {
+    ) -> impl loac::IntoReply<Self, Notify> {
         let _ = message.0.send(());
         ().ready()
     }
@@ -85,7 +85,7 @@ impl DispatchHandler<Notify> for Right {
         &mut self,
         message: Notify,
         _scope: &mut ActorScope<Self>,
-    ) -> impl loac::IntoReply<Self, Notify> + use<> {
+    ) -> impl loac::IntoReply<Self, Notify> {
         let _ = message.0.send(());
         ().ready()
     }
@@ -162,7 +162,7 @@ impl DispatchHandler<SlowQuery> for GateActor {
         &mut self,
         message: SlowQuery,
         _scope: &mut ActorScope<Self>,
-    ) -> impl loac::IntoReply<Self, SlowQuery> + use<> {
+    ) -> impl loac::IntoReply<Self, SlowQuery> {
         async move {
             if let Some(entered) = message.entered {
                 let _ = entered.send(());
@@ -184,7 +184,7 @@ impl DispatchHandler<Mark> for GateActor {
         &mut self,
         message: Mark,
         _scope: &mut ActorScope<Self>,
-    ) -> impl loac::IntoReply<Self, Mark> + use<> {
+    ) -> impl loac::IntoReply<Self, Mark> {
         self.seen.fetch_add(message.0 as usize, Ordering::SeqCst);
         ().ready()
     }
@@ -199,7 +199,7 @@ impl DispatchHandler<Snapshot> for GateActor {
         &mut self,
         _message: Snapshot,
         _scope: &mut ActorScope<Self>,
-    ) -> impl loac::IntoReply<Self, Snapshot> + use<> {
+    ) -> impl loac::IntoReply<Self, Snapshot> {
         self.seen.load(Ordering::SeqCst).ready()
     }
 }

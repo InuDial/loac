@@ -12,9 +12,9 @@ use std::{
 };
 
 use loac::{
-    Actor, ActorFutureExt, ActorRef, ActorScope, CallError, ChildExit, DispatchHandler, ExitReason,
-    InterleavedFutureExt, IntoActorFuture, Message, ReplyExt, Response, Shutdown, SpawnOptions,
-    actor, reply, spawn_with,
+    Actor, ActorRef, ActorScope, CallError, ChildExit, Cx, DispatchHandler, ExitReason, Handler,
+    InterleavedFutureExt, Message, ReplyExt, Response, Shutdown, SpawnOptions, StreamHandler,
+    StreamOut, actor, reply, spawn_with,
 };
 use tokio::sync::{mpsc, oneshot};
 
@@ -51,7 +51,7 @@ impl DispatchHandler<StopChild> for HookChild {
         &mut self,
         _message: StopChild,
         scope: &mut ActorScope<Self>,
-    ) -> impl loac::IntoReply<Self, StopChild> + use<> {
+    ) -> impl loac::IntoReply<Self, StopChild> {
         let _ = scope.request_shutdown(Shutdown::Stop);
         ().ready()
     }

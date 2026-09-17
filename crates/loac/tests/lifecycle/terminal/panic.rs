@@ -28,7 +28,7 @@ impl DispatchHandler<PanicNow> for PanicActor {
         &mut self,
         _message: PanicNow,
         _scope: &mut ActorScope<'_, Self>,
-    ) -> impl loac::IntoReply<Self, PanicNow> + use<> {
+    ) -> impl loac::IntoReply<Self, PanicNow> {
         panic!("intentional handler panic");
         #[allow(unreachable_code)]
         ().ready()
@@ -61,7 +61,7 @@ impl DispatchHandler<PanicAfterBarrier> for PanicActor {
         &mut self,
         message: PanicAfterBarrier,
         _scope: &mut ActorScope<'_, Self>,
-    ) -> impl loac::IntoReply<Self, PanicAfterBarrier> + use<> {
+    ) -> impl loac::IntoReply<Self, PanicAfterBarrier> {
         async move {
             let _ = message.entered.send(());
             message.barrier.wait();

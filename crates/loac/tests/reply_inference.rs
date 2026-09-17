@@ -1,14 +1,6 @@
 mod support;
 
-use std::{
-    pin::Pin,
-    task::{Context, Poll},
-};
-
-use loac::{
-    Actor, ActorFuture, ActorScope, DispatchHandler, ExitReason, InterleavedFutureExt, IntoReply,
-    Message, Shutdown, actor,
-};
+use loac::{Actor, ActorScope, Cx, ExitReason, Handler, Message, Shutdown, actor};
 
 use support::watchdog;
 
@@ -38,59 +30,22 @@ impl Actor for SecondActor {
     }
 }
 
-struct SharedFuture;
-
-impl ActorFuture<FirstActor> for SharedFuture {
-    type Output = u8;
-
-    fn poll(
-        self: Pin<&mut Self>,
-        actor: &mut FirstActor,
-        _scope: &mut ActorScope<FirstActor>,
-        _task: &mut Context<'_>,
-    ) -> Poll<Self::Output> {
-        Poll::Ready(actor.0)
+impl Handler<Read> for FirstActor {
+    async fn handle(_message: Read, mut cx: Cx<'_, Self>) -> u8 {
+        cx.with(|actor, _| actor.0)
     }
 }
 
-impl ActorFuture<SecondActor> for SharedFuture {
-    type Output = u8;
-
-    fn poll(
-        self: Pin<&mut Self>,
-        actor: &mut SecondActor,
-        _scope: &mut ActorScope<SecondActor>,
-        _task: &mut Context<'_>,
-    ) -> Poll<Self::Output> {
-        Poll::Ready(actor.0)
-    }
-}
-
-impl DispatchHandler<Read> for FirstActor {
-    fn handle(
-        &mut self,
-        _message: Read,
-        _scope: &mut ActorScope<Self>,
-    ) -> impl IntoReply<Self, Read> + use<> {
-        SharedFuture.interleaved()
-    }
-}
-
-impl DispatchHandler<Read> for SecondActor {
-    fn handle(
-        &mut self,
-        _message: Read,
-        _scope: &mut ActorScope<Self>,
-    ) -> impl IntoReply<Self, Read> + use<> {
-        SharedFuture.interleaved()
+impl Handler<Read> for SecondActor {
+    async fn handle(_message: Read, mut cx: Cx<'_, Self>) -> u8 {
+        cx.with(|actor, _| actor.0)
     }
 }
 
 #[tokio::test]
-async fn handler_context_selects_the_actor_future_implementation() {
-    // One concrete future implements ActorFuture for both actors. Driving both
-    // handlers in one expression ensures each IntoReply context selects its
-    // actor-specific implementation without an explicit type annotation.
+async fn handler_context_selects_each_actor_type() {
+    // Both handlers use one message type.
+    // Each Cx still resolves its actor type.
     let first_owner = loac::spawn::<FirstActor>(1);
     let second_owner = loac::spawn::<SecondActor>(2);
     let first = first_owner.actor_ref();

@@ -23,7 +23,7 @@ impl DispatchHandler<StopOwned> for StopActor {
         &mut self,
         message: StopOwned,
         _scope: &mut ActorScope<Self>,
-    ) -> impl loac::IntoReply<Self, StopOwned> + use<> {
+    ) -> impl loac::IntoReply<Self, StopOwned> {
         async move {
             let _ = message.entered.send(());
             let _ = message.release.await;

@@ -59,7 +59,7 @@ impl DispatchHandler<ParentPing> for LogParent {
         &mut self,
         _message: ParentPing,
         _scope: &mut ActorScope<'_, Self>,
-    ) -> impl loac::IntoReply<Self, ParentPing> + use<> {
+    ) -> impl loac::IntoReply<Self, ParentPing> {
         ().ready()
     }
 }

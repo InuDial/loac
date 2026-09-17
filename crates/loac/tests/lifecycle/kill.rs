@@ -1,8 +1,8 @@
 use std::{future, sync::mpsc as std_mpsc, time::Duration};
 
 use loac::{
-    ActorScope, CallError, DispatchHandler, ExitReason, IntoActorFuture, Message, ReplyExt,
-    Shutdown, ShutdownStatus,
+    ActorScope, CallError, Cx, DispatchHandler, ExitReason, Handler, Message, ReplyExt, Shutdown,
+    ShutdownStatus,
 };
 use tokio::sync::oneshot;
 
@@ -19,19 +19,27 @@ struct Interruptible {
     dropped: DropSignal,
 }
 
-impl DispatchHandler<Interruptible> for LifecycleActor {
-    fn handle(
-        &mut self,
-        message: Interruptible,
-        _scope: &mut ActorScope<'_, Self>,
-    ) -> impl loac::IntoReply<Self, Interruptible> + use<> {
-        async move {
-            let _dropped = message.dropped;
-            let _ = message.entered.send(());
-            let _ = message.release.await;
-        }
-        .into_actor()
-        .exclusive()
+impl Handler<Interruptible> for LifecycleActor {
+    async fn handle(message: Interruptible, mut cx: Cx<'_, Self>) {
+        let _guard = cx.exclusive();
+        let _dropped = message.dropped;
+        let _ = message.entered.send(());
+        let _ = message.release.await;
+    }
+}
+
+#[derive(Message)]
+#[message(reply = ())]
+struct ForgottenLease {
+    entered: oneshot::Sender<()>,
+}
+
+impl Handler<ForgottenLease> for LifecycleActor {
+    async fn handle(message: ForgottenLease, mut cx: Cx<'_, Self>) {
+        let guard = cx.exclusive();
+        std::mem::forget(guard);
+        let _ = message.entered.send(());
+        future::pending().await
     }
 }
 
@@ -61,7 +69,7 @@ impl DispatchHandler<OwnedInterruptible> for LifecycleActor {
         &mut self,
         message: OwnedInterruptible,
         _scope: &mut ActorScope<'_, Self>,
-    ) -> impl loac::IntoReply<Self, OwnedInterruptible> + use<> {
+    ) -> impl loac::IntoReply<Self, OwnedInterruptible> {
         async move {
             let _drop_barrier = message.drop_barrier;
             let _ = message.entered.send(());
@@ -79,7 +87,7 @@ impl DispatchHandler<KillBeforeReady> for LifecycleActor {
         &mut self,
         _message: KillBeforeReady,
         scope: &mut ActorScope<'_, Self>,
-    ) -> impl loac::IntoReply<Self, KillBeforeReady> + use<> {
+    ) -> impl loac::IntoReply<Self, KillBeforeReady> {
         assert_eq!(
             scope.request_shutdown(Shutdown::Kill),
             ShutdownStatus::Requested
@@ -140,6 +148,30 @@ async fn kill_drops_current_and_queued_work_without_cleanup() {
     assert_eq!(watchdog(owner.wait()).await.reason(), ExitReason::Killed);
     assert!(lock(&handled).is_empty());
     assert!(lock(&cleanup).is_empty());
+}
+
+#[tokio::test]
+async fn kill_terminates_a_reply_with_a_forgotten_lease() {
+    let mut owner = actor_with_capacity(1).owner;
+    let actor = owner.actor_ref();
+    let (entered_tx, entered_rx) = oneshot::channel();
+    let response = actor
+        .try_call(ForgottenLease {
+            entered: entered_tx,
+        })
+        .unwrap();
+
+    watchdog(entered_rx).await.unwrap();
+    assert_eq!(
+        owner.request_shutdown(Shutdown::Kill),
+        ShutdownStatus::Requested
+    );
+
+    assert_eq!(
+        watchdog(response).await,
+        Err(CallError::DuringDispatch(ExitReason::Killed))
+    );
+    assert_eq!(watchdog(owner.wait()).await.reason(), ExitReason::Killed);
 }
 
 // The destructor blocks after confirming cancellation; Kill must join owned

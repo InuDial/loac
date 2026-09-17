@@ -24,7 +24,7 @@ impl DispatchHandler<Token> for Collector {
         &mut self,
         message: Token,
         _scope: &mut ActorScope<'_, Self>,
-    ) -> impl loac::IntoReply<Self, Token> + use<> {
+    ) -> impl loac::IntoReply<Self, Token> {
         self.seen.lock().unwrap().push(message.0);
         ().ready()
     }

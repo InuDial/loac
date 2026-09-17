@@ -90,7 +90,7 @@ Dynamic options expose [`with_mailbox_capacity`](https://docs.rs/loac/latest/loa
 Here `option` is `interleaved`. It requires `mailbox`.
 
 The limit counts active replies. A full limit pauses dispatch before another
-handler starts. Exclusive replies remain available without `interleaved`.
+handler starts. Scoped scheduler leases require `interleaved`.
 Dynamic options expose [`with_max_in_flight`](https://docs.rs/loac/latest/loac/trait.DynamicInterleavingOptions.html#tymethod.with_max_in_flight).
 
 ### Child-Spawning
@@ -126,7 +126,7 @@ needs no interleaving lane, and is the short way to write a ready reply.
 Implement [`DispatchHandler`](https://docs.rs/loac/latest/loac/trait.DispatchHandler.html)
 directly only when a handler must choose an explicit reply strategy — for
 example, runtime branching between ready and an independently scheduled owned
-future, exclusive execution, or another runtime choice. Explicit dispatch
+future, interleaved execution, or another runtime choice. Explicit dispatch
 changes handler implementation and scheduling, not the declared result type.
 
 Omitting the `#[message(...)]` attribute entirely produces a send-only
@@ -143,16 +143,18 @@ macro.
 | --- | --- | --- |
 | ready | [`value.ready()`](https://docs.rs/loac/latest/loac/trait.ReplyExt.html#method.ready) from a [`DispatchHandler`](https://docs.rs/loac/latest/loac/trait.DispatchHandler.html) or [`SyncHandler`](https://docs.rs/loac/latest/loac/trait.SyncHandler.html) | The reply is already complete during dispatch. |
 | owned | A bare `Future` from a [`DispatchHandler`](https://docs.rs/loac/latest/loac/trait.DispatchHandler.html) | A Tokio task runs it beside all actor work. |
-| interleaved | [`Handler`](https://docs.rs/loac/latest/loac/trait.Handler.html) async fn, [`StreamHandler`](https://docs.rs/loac/latest/loac/trait.StreamHandler.html) async fn, `future.interleaved()`, or [`ActorScope::cx_reply`](https://docs.rs/loac/latest/loac/struct.ActorScope.html#method.cx_reply) / [`ActorScope::cx_stream`](https://docs.rs/loac/latest/loac/struct.ActorScope.html#method.cx_stream) from a [`DispatchHandler`](https://docs.rs/loac/latest/loac/trait.DispatchHandler.html) | The actor task polls it fairly with mailbox, lifecycle, and other interleaved work. |
-| exclusive | `future.exclusive()`, [`ActorScope::cx_exclusive`](https://docs.rs/loac/latest/loac/struct.ActorScope.html#method.cx_exclusive), or [`ActorScope::cx_stream_exclusive`](https://docs.rs/loac/latest/loac/struct.ActorScope.html#method.cx_stream_exclusive) from a [`DispatchHandler`](https://docs.rs/loac/latest/loac/trait.DispatchHandler.html) | Mailbox and actor-aware work pause until it finishes; owned tasks continue. |
+| interleaved | [`Handler`](https://docs.rs/loac/latest/loac/trait.Handler.html), [`StreamHandler`](https://docs.rs/loac/latest/loac/trait.StreamHandler.html), or `future.interleaved()` | The actor task polls it fairly with other actor work. |
 
 `Handler` and `StreamHandler` always select interleaved scheduling, so they
-require `interleaved`. A `DispatchHandler` may select any strategy. `ready`
-and `exclusive` need no interleaving capability.
+require `interleaved`. A `DispatchHandler` selects explicit strategies.
 
-The `cx` constructors on [`ActorScope`](https://docs.rs/loac/latest/loac/struct.ActorScope.html)
-pair `Cx` access with an explicit scheduling lane.
-Call [`cx_reply`](https://docs.rs/loac/latest/loac/struct.ActorScope.html#method.cx_reply) / [`cx_stream`](https://docs.rs/loac/latest/loac/struct.ActorScope.html#method.cx_stream) inside an explicit `DispatchHandler` for an interleaved cx future, and [`cx_exclusive`](https://docs.rs/loac/latest/loac/struct.ActorScope.html#method.cx_exclusive) / [`cx_stream_exclusive`](https://docs.rs/loac/latest/loac/struct.ActorScope.html#method.cx_stream_exclusive) for an exclusive cx future. Inside the returned future, call `Cx::with` for temporary actor and scope access.
+`Handler` and `StreamHandler` receive a `Cx` handle.
+Call `Cx::with` for temporary actor and scope access.
+Call `Cx::exclusive` for a scoped scheduler lease.
+Scheduled actor work pauses until that guard drops.
+Graceful `on_shutdown` hooks may still preempt the lease.
+
+See the [`Cx` safety argument](SAFETY.md) for unsafe invariants.
 
 Stream messages use `#[message(stream = Item, reply = Final)]`. The runtime
 creates a bounded item channel and returns the receiver to the caller as a
@@ -183,8 +185,8 @@ Kill takes effect between polls. It cannot interrupt a synchronous handler, a po
 - [`spawn`](https://docs.rs/loac/latest/loac/fn.spawn.html) schedules `init` and returns immediately. Admission opens before `init` finishes.
 - `init` and lifecycle hooks run serially and block dispatch.
 - Mailbox FIFO decides dispatch order. Async replies may complete in a different order.
-- A self-call needs fresh dispatch capacity. It cannot complete during `init` or exclusive work.
-- Prefer [`ActorFutureExt::map`](https://docs.rs/loac/latest/loac/trait.ActorFutureExt.html#method.map) or [`then`](https://docs.rs/loac/latest/loac/trait.ActorFutureExt.html#method.then) for consecutive actor work.
+- A self-call needs fresh dispatch capacity. Leases pause that dispatch.
+- Use `Cx::with` between awaits for consecutive actor work.
 - Address cycles can deadlock when every participant waits.
 
 Licensed under the MIT License.

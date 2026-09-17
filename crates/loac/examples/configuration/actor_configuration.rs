@@ -37,7 +37,7 @@ impl DispatchHandler<HealthCheck> for Service {
         &mut self,
         _message: HealthCheck,
         _scope: &mut ActorScope<Self>,
-    ) -> impl loac::IntoReply<Self, HealthCheck> + use<> {
+    ) -> impl loac::IntoReply<Self, HealthCheck> {
         "ready".ready()
     }
 }

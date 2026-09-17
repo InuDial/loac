@@ -7,9 +7,9 @@ use std::{
 };
 
 use loac::{
-    Actor, ActorConfig, ActorFuture, ActorFutureExt, ActorScope, DispatchHandler, ExitReason,
-    HasChildren, HasInterleaving, InterleavedFutureExt, IntoActorFuture, IntoReply, Message,
-    MessageConfig, ReplyExt, Shutdown, SupervisionConfig, scheduling, spawn_with, supervision,
+    Actor, ActorConfig, ActorScope, Cx, DispatchHandler, ExitReason, Handler, HasChildren,
+    HasInterleaving, Message, MessageConfig, ReplyExt, Shutdown, SupervisionConfig, scheduling,
+    spawn_with, supervision,
     transport::{
         ErasedEnvelope, MessageInbox, MessageReservation, MessageSender, RuntimeInbox,
         TryReserveError,
@@ -251,18 +251,12 @@ impl Actor for ManualUnbounded {
 #[message(reply = u64)]
 struct Add(u64);
 
-impl DispatchHandler<Add> for ManualActor {
-    fn handle(
-        &mut self,
-        message: Add,
-        _scope: &mut ActorScope<'_, Self>,
-    ) -> impl IntoReply<Self, Add> + use<> {
-        generic_interleaved_reply(std::future::ready(message.0).into_actor().map(
-            |amount, actor: &mut Self, _scope| {
-                actor.0 += amount;
-                actor.0
-            },
-        ))
+impl Handler<Add> for ManualActor {
+    async fn handle(message: Add, mut cx: Cx<'_, Self>) -> u64 {
+        cx.with(|actor, _| {
+            actor.0 += message.0;
+            actor.0
+        })
     }
 }
 
@@ -275,7 +269,7 @@ impl DispatchHandler<Notify> for ManualActor {
         &mut self,
         message: Notify,
         _scope: &mut ActorScope<'_, Self>,
-    ) -> impl loac::IntoReply<Self, Notify> + use<> {
+    ) -> impl loac::IntoReply<Self, Notify> {
         self.0 += message.0;
         ().ready()
     }
@@ -284,15 +278,6 @@ impl DispatchHandler<Notify> for ManualActor {
 fn assert_send<T: Send>(_: &T) {}
 fn assert_has_children<A: HasChildren>() {}
 fn assert_has_interleaving<A: HasInterleaving>() {}
-
-fn generic_interleaved_reply<A, M, F>(future: F) -> impl IntoReply<A, M>
-where
-    A: HasInterleaving,
-    M: Message,
-    F: ActorFuture<A, Output = M::Reply> + Send + 'static,
-{
-    future.interleaved()
-}
 
 // A manual transport may select every active scheduler profile.
 #[test]
