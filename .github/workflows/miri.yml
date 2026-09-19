@@ -1,0 +1,44 @@
+name: Miri
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: "17 3 * * 1"
+
+permissions:
+  contents: read
+
+jobs:
+  miri:
+    name: Miri (${{ matrix.name }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: stacked-borrows
+            flags: -Zmiri-disable-isolation
+          - name: tree-borrows
+            flags: -Zmiri-disable-isolation -Zmiri-tree-borrows
+    steps:
+      - name: Check out the repository
+        uses: actions/checkout@v4
+
+      - name: Install nightly Rust and Miri
+        uses: dtolnay/rust-toolchain@nightly
+        with:
+          components: miri
+
+      - name: Cache the cargo registry
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+          key: ${{ runner.os }}-miri-${{ hashFiles('Cargo.lock') }}
+
+      - name: Run Miri
+        run: cargo miri test -p loac --lib --tests --no-fail-fast
+        env:
+          MIRIFLAGS: ${{ matrix.flags }}
