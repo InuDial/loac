@@ -7,7 +7,9 @@ use std::{
 };
 
 pub async fn watchdog<F: Future>(future: F) -> F::Output {
-    tokio::time::timeout(Duration::from_secs(2), future)
+    // Miri interprets far slower than native execution.
+    let seconds = if cfg!(miri) { 600 } else { 2 };
+    tokio::time::timeout(Duration::from_secs(seconds), future)
         .await
         .expect("runtime operation exceeded the deadlock watchdog")
 }
