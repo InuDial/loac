@@ -137,6 +137,7 @@ verify_package() (
 crate_status() (
     local package=${1:?crate name is required}
     local version archive local_checksum response_file http_code published_checksum
+    local published_archive=
     [[ "$package" == loac || "$package" == loac-macros ]] ||
         die "unknown package: $package"
     version=$(release_version)
@@ -145,7 +146,7 @@ crate_status() (
     local_checksum=$(shasum -a 256 "$archive" | awk '{print $1}')
 
     response_file=$(mktemp "${TMPDIR:-/tmp}/loac-registry.XXXXXX")
-    trap 'rm -f "$response_file"' EXIT
+    trap 'rm -f "$response_file" "$published_archive"' EXIT
     http_code=$(curl --silent --show-error --location --retry 3 \
         --user-agent "loac-release (https://github.com/InuDial/loac)" \
         --output "$response_file" --write-out '%{http_code}' \
@@ -168,6 +169,16 @@ except (KeyError, TypeError):
 ' <"$response_file")
             if [[ "$local_checksum" == "$published_checksum" ]]; then
                 printf 'match\n'
+                return
+            fi
+            published_archive=$(mktemp "${TMPDIR:-/tmp}/loac-published.XXXXXX")
+            curl --silent --show-error --location --retry 3 \
+                --user-agent "loac-release (https://github.com/InuDial/loac)" \
+                --output "$published_archive" \
+                "https://crates.io/api/v1/crates/$package/$version/download" ||
+                die "could not download published $package $version"
+            if same_package_contents "$archive" "$published_archive"; then
+                printf 'match\n'
             else
                 printf 'mismatch\n'
             fi
@@ -177,6 +188,29 @@ except (KeyError, TypeError):
             ;;
     esac
 )
+
+# Repackaging embeds the current git revision, which changes with every commit.
+# Compare extracted contents so an unchanged release matches on retries.
+same_package_contents() {
+    local local_archive=${1:?local archive is required}
+    local published_archive=${2:?published archive is required}
+    local work result=0
+    work=$(mktemp -d "${TMPDIR:-/tmp}/loac-compare.XXXXXX")
+
+    mkdir -p "$work/local" "$work/published"
+    tar -xzf "$local_archive" -C "$work/local" || {
+        rm -rf "$work"
+        return 1
+    }
+    tar -xzf "$published_archive" -C "$work/published" || {
+        rm -rf "$work"
+        return 1
+    }
+    find "$work" -name .cargo_vcs_info.json -delete
+    diff -r "$work/local" "$work/published" >/dev/null || result=1
+    rm -rf "$work"
+    return "$result"
+}
 
 remote_tag_commit() {
     local tag=${1:?tag name is required}
