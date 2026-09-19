@@ -85,7 +85,7 @@ needs a new version and a new release commit.
 After the workflow succeeds, verify the tag and both registry entries:
 
 ```bash
-VERSION=0.2.0
+VERSION=0.3.0
 git fetch origin --tags
 git show --stat "loac-v$VERSION"
 cargo info "loac@$VERSION"

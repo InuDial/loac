@@ -147,6 +147,7 @@ crate_status() (
     response_file=$(mktemp "${TMPDIR:-/tmp}/loac-registry.XXXXXX")
     trap 'rm -f "$response_file"' EXIT
     http_code=$(curl --silent --show-error --location --retry 3 \
+        --user-agent "loac-release (https://github.com/InuDial/loac)" \
         --output "$response_file" --write-out '%{http_code}' \
         "https://crates.io/api/v1/crates/$package/$version") ||
         die "could not query crates.io for $package $version"
