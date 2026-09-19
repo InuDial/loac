@@ -21,6 +21,11 @@ jobs:
           fetch-depth: 0
           ref: main
 
+      - name: Configure the tag identity
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
       - name: Install Rust 1.97.1
         uses: dtolnay/rust-toolchain@1.97.1
         with:
