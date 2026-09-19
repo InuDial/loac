@@ -14,8 +14,10 @@ jobs:
       - name: Check out the repository
         uses: actions/checkout@v4
 
-      - name: Install stable Rust
-        uses: dtolnay/rust-toolchain@stable
+      - name: Install Rust 1.97.1
+        uses: dtolnay/rust-toolchain@1.97.1
+        with:
+          components: rustfmt
 
       - name: Check formatting
         run: cargo fmt --all -- --check

@@ -21,8 +21,10 @@ jobs:
           fetch-depth: 0
           ref: main
 
-      - name: Install stable Rust
-        uses: dtolnay/rust-toolchain@stable
+      - name: Install Rust 1.97.1
+        uses: dtolnay/rust-toolchain@1.97.1
+        with:
+          components: rustfmt
 
       - name: Validate source and release metadata
         run: bash scripts/release-loac.sh check
