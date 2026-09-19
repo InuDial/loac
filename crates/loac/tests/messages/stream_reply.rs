@@ -40,7 +40,7 @@ impl StreamHandler<StreamNumbers> for StreamActor {
 
 struct ExclusiveStreamActor;
 
-#[actor(mailbox, interleaved)]
+#[actor(mailbox)]
 impl Actor for ExclusiveStreamActor {
     type SpawnArgs = ();
 
@@ -74,7 +74,7 @@ impl StreamHandler<ExclusiveStreamNumbers> for ExclusiveStreamActor {
 
 struct ConcurrentStreamActor;
 
-#[actor(mailbox, interleaved)]
+#[actor(mailbox)]
 impl Actor for ConcurrentStreamActor {
     type SpawnArgs = ();
 

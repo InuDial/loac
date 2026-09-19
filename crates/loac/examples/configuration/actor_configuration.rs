@@ -15,10 +15,12 @@ const MAX_IN_FLIGHT: usize = 16;
 struct Service;
 
 #[actor(
-    mailbox = dynamic(DEFAULT_MAILBOX_CAPACITY),
-    mailbox_budget = MAILBOX_DISPATCH_BUDGET,
-    interleaved = MAX_IN_FLIGHT,
-    children = unbounded,
+    mailbox,
+    mailbox_capacity = dynamic(DEFAULT_MAILBOX_CAPACITY),
+    mailbox_dispatch_budget = MAILBOX_DISPATCH_BUDGET,
+    max_in_flight = MAX_IN_FLIGHT,
+    children,
+    max_children = unbounded,
 )]
 impl Actor for Service {
     type SpawnArgs = ();

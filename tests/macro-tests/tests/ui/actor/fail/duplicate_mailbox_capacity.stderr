@@ -1,0 +1,5 @@
+error: duplicate `mailbox_capacity` option
+ --> tests/ui/actor/fail/duplicate_mailbox_capacity.rs:4:59
+  |
+4 | #[actor_api::actor(mailbox, mailbox_capacity = unbounded, mailbox_capacity = 8)]
+  |                                                           ^^^^^^^^^^^^^^^^

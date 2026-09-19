@@ -9,7 +9,7 @@ use loac::{
 };
 
 use super::{
-    Block, Notify, Record, SerialActor, single_slot_options,
+    Block, MailboxActor, Notify, Record, single_slot_options,
     support::{lock, watchdog},
 };
 
@@ -17,7 +17,7 @@ use super::{
 #[message(reply = Vec<u8>)]
 struct Snapshot;
 
-impl Handler<Snapshot> for SerialActor {
+impl Handler<Snapshot> for MailboxActor {
     async fn handle(_message: Snapshot, mut cx: Cx<'_, Self>) -> Vec<u8> {
         cx.with(|actor, _| lock(&actor.committed).clone())
     }
@@ -31,7 +31,7 @@ struct CommitAfterRelease {
     release: tokio::sync::oneshot::Receiver<()>,
 }
 
-impl Handler<CommitAfterRelease> for SerialActor {
+impl Handler<CommitAfterRelease> for MailboxActor {
     async fn handle(message: CommitAfterRelease, mut cx: Cx<'_, Self>) {
         let mut guard = cx.exclusive();
         let _ = message.entered.send(());
@@ -42,7 +42,7 @@ impl Handler<CommitAfterRelease> for SerialActor {
 
 #[tokio::test]
 async fn try_call_returns_the_original_message_when_mailbox_is_full() {
-    let owner = spawn_with::<SerialActor>(Arc::default(), single_slot_options());
+    let owner = spawn_with::<MailboxActor>(Arc::default(), single_slot_options());
     let actor = owner.actor_ref();
     let (entered_tx, entered_rx) = tokio::sync::oneshot::channel();
     let (release_tx, release_rx) = tokio::sync::oneshot::channel();
@@ -75,7 +75,7 @@ async fn try_call_returns_the_original_message_when_mailbox_is_full() {
 
 #[tokio::test]
 async fn abandoning_a_queued_response_skips_its_handler() {
-    let owner = spawn_with::<SerialActor>(Arc::default(), single_slot_options());
+    let owner = spawn_with::<MailboxActor>(Arc::default(), single_slot_options());
     let actor = owner.actor_ref();
     let (entered_tx, entered_rx) = tokio::sync::oneshot::channel();
     let (release_tx, release_rx) = tokio::sync::oneshot::channel();
@@ -114,7 +114,7 @@ async fn abandoning_a_queued_response_skips_its_handler() {
 #[tokio::test]
 async fn admitted_one_way_message_cannot_be_abandoned_by_its_sender() {
     let committed = Arc::new(Mutex::new(Vec::new()));
-    let owner = spawn_with::<SerialActor>(Arc::clone(&committed), single_slot_options());
+    let owner = spawn_with::<MailboxActor>(Arc::clone(&committed), single_slot_options());
     let actor = owner.actor_ref();
     let (entered_tx, entered_rx) = tokio::sync::oneshot::channel();
     let (release_tx, release_rx) = tokio::sync::oneshot::channel();
@@ -154,7 +154,7 @@ async fn admitted_one_way_message_cannot_be_abandoned_by_its_sender() {
 #[tokio::test]
 async fn cancelling_a_waiting_send_discards_the_uncommitted_message() {
     let committed = Arc::new(Mutex::new(Vec::new()));
-    let owner = spawn_with::<SerialActor>(Arc::clone(&committed), single_slot_options());
+    let owner = spawn_with::<MailboxActor>(Arc::clone(&committed), single_slot_options());
     let actor = owner.actor_ref();
     let (entered_tx, entered_rx) = tokio::sync::oneshot::channel();
     let (release_tx, release_rx) = tokio::sync::oneshot::channel();
@@ -193,7 +193,7 @@ async fn cancelling_a_waiting_send_discards_the_uncommitted_message() {
 #[tokio::test]
 async fn cancelling_a_waiting_call_discards_the_uncommitted_message() {
     let committed = Arc::new(Mutex::new(Vec::new()));
-    let owner = spawn_with::<SerialActor>(Arc::clone(&committed), single_slot_options());
+    let owner = spawn_with::<MailboxActor>(Arc::clone(&committed), single_slot_options());
     let actor = owner.actor_ref();
     let (entered_tx, entered_rx) = tokio::sync::oneshot::channel();
     let (release_tx, release_rx) = tokio::sync::oneshot::channel();
@@ -230,7 +230,7 @@ async fn cancelling_a_waiting_call_discards_the_uncommitted_message() {
 // mailbox and lifecycle cutoff return the exact message that never committed.
 #[tokio::test]
 async fn try_send_recovers_messages_rejected_as_full_or_closed() {
-    let owner = spawn_with::<SerialActor>(Arc::default(), single_slot_options());
+    let owner = spawn_with::<MailboxActor>(Arc::default(), single_slot_options());
     let actor = owner.actor_ref();
     let (entered_tx, entered_rx) = tokio::sync::oneshot::channel();
     let (release_tx, release_rx) = tokio::sync::oneshot::channel();
@@ -269,7 +269,7 @@ async fn try_send_recovers_messages_rejected_as_full_or_closed() {
 // exact message that never committed.
 #[tokio::test]
 async fn try_call_recovers_the_message_when_shutdown_closes_admission() {
-    let owner = spawn_with::<SerialActor>(Arc::default(), single_slot_options());
+    let owner = spawn_with::<MailboxActor>(Arc::default(), single_slot_options());
     let actor = owner.actor_ref();
     let (entered_tx, entered_rx) = tokio::sync::oneshot::channel();
     let (release_tx, release_rx) = tokio::sync::oneshot::channel();
@@ -304,7 +304,7 @@ async fn try_call_recovers_the_message_when_shutdown_closes_admission() {
 // wake the waiter and return that message instead of silently discarding it.
 #[tokio::test]
 async fn send_recovers_a_message_when_shutdown_wins_admission() {
-    let owner = spawn_with::<SerialActor>(Arc::default(), single_slot_options());
+    let owner = spawn_with::<MailboxActor>(Arc::default(), single_slot_options());
     let actor = owner.actor_ref();
     let (entered_tx, entered_rx) = tokio::sync::oneshot::channel();
     let (release_tx, release_rx) = tokio::sync::oneshot::channel();
@@ -344,7 +344,7 @@ async fn send_recovers_a_message_when_shutdown_wins_admission() {
 #[tokio::test]
 async fn ready_capacity_does_not_bypass_closed_admission() {
     let committed = Arc::default();
-    let mut owner = loac::spawn::<SerialActor>(Arc::clone(&committed));
+    let mut owner = loac::spawn::<MailboxActor>(Arc::clone(&committed));
     let actor = owner.actor_ref();
 
     assert!(matches!(
@@ -360,7 +360,7 @@ async fn ready_capacity_does_not_bypass_closed_admission() {
 
 #[tokio::test]
 async fn abandoning_an_in_flight_call_does_not_cancel_handler_effects() {
-    let owner = loac::spawn::<SerialActor>(Arc::default());
+    let owner = loac::spawn::<MailboxActor>(Arc::default());
     let actor = owner.actor_ref();
     let (entered_tx, entered_rx) = tokio::sync::oneshot::channel();
     let (release_tx, release_rx) = tokio::sync::oneshot::channel();
@@ -391,7 +391,7 @@ async fn abandoning_an_in_flight_call_does_not_cancel_handler_effects() {
 
 #[tokio::test]
 async fn a_capacity_waiter_wakes_when_stop_closes_admission() {
-    let owner = spawn_with::<SerialActor>(Arc::default(), single_slot_options());
+    let owner = spawn_with::<MailboxActor>(Arc::default(), single_slot_options());
     let actor = owner.actor_ref();
     let (entered_tx, entered_rx) = tokio::sync::oneshot::channel();
     let (release_tx, release_rx) = tokio::sync::oneshot::channel();

@@ -14,7 +14,7 @@ struct Ping;
 
 struct DynamicActor;
 
-#[actor(mailbox = dynamic)]
+#[actor(mailbox, mailbox_capacity = dynamic)]
 impl Actor for DynamicActor {
     type SpawnArgs = oneshot::Receiver<()>;
 
@@ -30,7 +30,7 @@ impl Handler<Ping> for DynamicActor {
 
 struct CustomDynamicActor;
 
-#[actor(mailbox = dynamic(3))]
+#[actor(mailbox, mailbox_capacity = dynamic(3))]
 impl Actor for CustomDynamicActor {
     type SpawnArgs = oneshot::Receiver<()>;
 
@@ -46,7 +46,7 @@ impl Handler<Ping> for CustomDynamicActor {
 
 struct FixedActor;
 
-#[actor(mailbox = 2)]
+#[actor(mailbox, mailbox_capacity = 2)]
 impl Actor for FixedActor {
     type SpawnArgs = oneshot::Receiver<()>;
 
@@ -62,7 +62,7 @@ impl Handler<Ping> for FixedActor {
 
 struct UnboundedActor;
 
-#[actor(mailbox = unbounded)]
+#[actor(mailbox, mailbox_capacity = unbounded)]
 impl Actor for UnboundedActor {
     type SpawnArgs = oneshot::Receiver<()>;
 

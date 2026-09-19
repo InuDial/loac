@@ -11,7 +11,7 @@ use std::{
 use loac::{ExitReason, Shutdown, ShutdownStatus, spawn_with};
 use tokio::sync::oneshot;
 
-use super::{Block, Notify, Record, SerialActor, single_slot_options, support::watchdog};
+use super::{Block, MailboxActor, Notify, Record, single_slot_options, support::watchdog};
 
 struct PanicWake(Arc<AtomicUsize>);
 
@@ -48,7 +48,7 @@ impl Drop for PanicWakeDrop {
 // A caller Waker must not unwind through that task.
 #[tokio::test]
 async fn capacity_waker_panic_does_not_fail_the_actor() {
-    let owner = spawn_with::<SerialActor>(Arc::default(), single_slot_options());
+    let owner = spawn_with::<MailboxActor>(Arc::default(), single_slot_options());
     let actor = owner.actor_ref();
     let (entered_tx, entered_rx) = oneshot::channel();
     let (release_tx, release_rx) = oneshot::channel();
@@ -91,7 +91,7 @@ async fn capacity_waker_panic_does_not_fail_the_actor() {
 // Its Drop panic must not destroy send recovery.
 #[tokio::test]
 async fn capacity_waker_drop_panic_preserves_the_waiting_message() {
-    let mut owner = spawn_with::<SerialActor>(Arc::default(), single_slot_options());
+    let mut owner = spawn_with::<MailboxActor>(Arc::default(), single_slot_options());
     let actor = owner.actor_ref();
     let (entered_tx, entered_rx) = oneshot::channel();
     let (release_tx, release_rx) = oneshot::channel();

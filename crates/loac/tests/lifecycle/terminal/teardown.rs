@@ -112,7 +112,7 @@ fn executor_teardown_discards_each_accepted_message() {
 
 struct PendingReplyActor;
 
-#[actor(mailbox = 2, interleaved = 2)]
+#[actor(mailbox, mailbox_capacity = 2, max_in_flight = 2)]
 impl Actor for PendingReplyActor {
     type SpawnArgs = ();
 
@@ -221,7 +221,7 @@ impl Drop for CxDropActor {
     }
 }
 
-#[actor(mailbox, interleaved)]
+#[actor(mailbox)]
 impl Actor for CxDropActor {
     type SpawnArgs = Arc<AtomicUsize>;
 
@@ -307,7 +307,7 @@ impl Drop for CxStreamDropActor {
     }
 }
 
-#[actor(mailbox, interleaved)]
+#[actor(mailbox)]
 impl Actor for CxStreamDropActor {
     type SpawnArgs = Arc<AtomicUsize>;
 

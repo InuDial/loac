@@ -62,7 +62,7 @@ struct SupervisorArgs {
     child_exits_during_init: bool,
 }
 
-#[actor(mailbox, children = unbounded, interleaved)]
+#[actor(mailbox, children, max_children = unbounded)]
 impl Actor for Supervisor {
     type SpawnArgs = SupervisorArgs;
 

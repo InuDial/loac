@@ -1,0 +1,5 @@
+error: `max_in_flight` requires `mailbox`
+ --> tests/ui/actor/fail/max_in_flight_without_mailbox.rs:4:20
+  |
+4 | #[actor_api::actor(max_in_flight = 4)]
+  |                    ^^^^^^^^^^^^^

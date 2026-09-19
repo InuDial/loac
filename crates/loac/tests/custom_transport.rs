@@ -143,24 +143,24 @@ impl Actor for ManualActor {
     }
 }
 
-struct ManualSerial;
+struct ManualLeaf;
 
-impl ActorConfig for ManualSerial {
+impl ActorConfig for ManualLeaf {
     type Options = ();
 }
 
-impl MessageConfig for ManualSerial {
+impl MessageConfig for ManualLeaf {
     type Sender = ManualSender<Self>;
     type Inbox = ManualInbox<Self>;
-    type Scheduler = scheduling::Serial<Self>;
+    type Scheduler = scheduling::Fixed<Self, 1>;
 
     fn open(_options: &Self::Options) -> (Self::Sender, Self::Inbox, Self::Scheduler) {
         let (sender, inbox) = ManualSender::open();
-        (sender, inbox, scheduling::Serial::new())
+        (sender, inbox, scheduling::Fixed::new())
     }
 }
 
-impl SupervisionConfig for ManualSerial {
+impl SupervisionConfig for ManualLeaf {
     type Children = supervision::Disabled;
 
     fn open_children(_options: &Self::Options) -> Self::Children {
@@ -168,7 +168,7 @@ impl SupervisionConfig for ManualSerial {
     }
 }
 
-impl Actor for ManualSerial {
+impl Actor for ManualLeaf {
     type SpawnArgs = ();
 
     async fn init(_: (), _scope: &mut ActorScope<'_, Self>) -> Self {
@@ -277,11 +277,10 @@ fn assert_has_children<A: HasChildren>() {}
 fn manual_transport_selects_each_public_scheduler() {
     let options = ManualOptions::default();
     let (_, _, fixed): (_, _, scheduling::Fixed<ManualActor, 1>) = ManualActor::open(&options);
-    let (_, _, serial): (_, _, scheduling::Serial<ManualSerial>) = ManualSerial::open(&());
     let (_, _, dynamic): (_, _, scheduling::Dynamic<ManualDynamic>) = ManualDynamic::open(&());
     let (_, _, unbounded): (_, _, scheduling::Unbounded<ManualUnbounded>) =
         ManualUnbounded::open(&());
-    drop((fixed, serial, dynamic, unbounded));
+    drop((fixed, dynamic, unbounded));
 }
 
 // Manual configs can select every built-in supervision profile.
@@ -289,7 +288,7 @@ fn manual_transport_selects_each_public_scheduler() {
 fn manual_configs_select_each_public_supervisor() {
     let options = ManualOptions::default();
     let _: supervision::Fixed<1> = ManualActor::open_children(&options);
-    let _: supervision::Disabled = ManualSerial::open_children(&());
+    let _: supervision::Disabled = ManualLeaf::open_children(&());
     let _: supervision::Dynamic = ManualDynamic::open_children(&());
     let _: supervision::Unbounded = ManualUnbounded::open_children(&());
 

@@ -3,7 +3,7 @@ use loac::Writer;
 
 struct CxExclusiveCounter(u8);
 
-#[actor(mailbox, interleaved)]
+#[actor(mailbox)]
 impl Actor for CxExclusiveCounter {
     type SpawnArgs = u8;
 

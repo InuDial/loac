@@ -196,7 +196,7 @@ impl Drop for ReadyThenDropPanic {
     }
 }
 
-#[actor(children = unbounded)]
+#[actor(children, max_children = unbounded)]
 impl Actor for ReadyDropActor {
     type SpawnArgs = ReadyDropArgs;
 
@@ -245,7 +245,7 @@ struct PanicInit {
     cleanup: Arc<AtomicUsize>,
 }
 
-#[actor(mailbox, children = unbounded)]
+#[actor(mailbox, children, max_children = unbounded)]
 impl Actor for PanicInit {
     type SpawnArgs = PanicInitArgs;
 

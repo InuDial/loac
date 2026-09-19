@@ -1,0 +1,5 @@
+error: child limit must be greater than zero
+ --> tests/ui/actor/fail/zero_max_children.rs:4:45
+  |
+4 | #[actor_api::actor(children, max_children = 0)]
+  |                                             ^

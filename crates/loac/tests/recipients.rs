@@ -112,7 +112,7 @@ struct GateActor {
     seen: Arc<AtomicUsize>,
 }
 
-#[actor(mailbox = 1)]
+#[actor(mailbox, mailbox_capacity = 1)]
 impl Actor for GateActor {
     type SpawnArgs = Arc<AtomicUsize>;
 

@@ -59,11 +59,11 @@ pub(crate) use task::{
 /// Actor-specific configuration applied to one spawn.
 ///
 /// Dynamic mailbox options expose
-/// [`with_mailbox_capacity`](crate::DynamicMailboxOptions::with_mailbox_capacity).
+/// [`with_mailbox_capacity`](crate::DynamicMailboxCapacityOptions::with_mailbox_capacity).
 /// Dynamic handler-concurrency options expose
-/// [`with_max_in_flight`](crate::DynamicInterleavingOptions::with_max_in_flight).
+/// [`with_max_in_flight`](crate::DynamicMaxInFlightOptions::with_max_in_flight).
 /// Dynamic supervision options expose
-/// [`with_max_children`](crate::DynamicChildrenOptions::with_max_children).
+/// [`with_max_children`](crate::DynamicMaxChildrenOptions::with_max_children).
 /// Pass changed options to [`spawn_with`].
 /// Fixed and unbounded profiles expose no matching builder.
 pub type SpawnOptions<A> = <A as ActorConfig>::Options;

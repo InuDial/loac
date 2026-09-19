@@ -1,0 +1,5 @@
+error: `mailbox_capacity` requires `mailbox`
+ --> tests/ui/actor/fail/mailbox_capacity_without_mailbox.rs:3:20
+  |
+3 | #[actor_api::actor(mailbox_capacity = 8)]
+  |                    ^^^^^^^^^^^^^^^^

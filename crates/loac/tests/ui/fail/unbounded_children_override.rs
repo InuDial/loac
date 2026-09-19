@@ -2,7 +2,7 @@ use std::num::NonZeroUsize;
 
 struct Unbounded;
 
-#[loac::actor(children = unbounded)]
+#[loac::actor(children, max_children = unbounded)]
 impl loac::Actor for Unbounded {
     type SpawnArgs = ();
 

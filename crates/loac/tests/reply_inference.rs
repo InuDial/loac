@@ -10,7 +10,7 @@ struct Read;
 
 struct FirstActor(u8);
 
-#[actor(mailbox, interleaved)]
+#[actor(mailbox)]
 impl Actor for FirstActor {
     type SpawnArgs = u8;
 
@@ -21,7 +21,7 @@ impl Actor for FirstActor {
 
 struct SecondActor(u8);
 
-#[actor(mailbox, interleaved)]
+#[actor(mailbox)]
 impl Actor for SecondActor {
     type SpawnArgs = u8;
 

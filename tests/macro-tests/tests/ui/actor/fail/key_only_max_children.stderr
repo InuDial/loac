@@ -1,0 +1,5 @@
+error: `max_children` requires `= <limit>`
+ --> tests/ui/actor/fail/key_only_max_children.rs:3:30
+  |
+3 | #[actor_api::actor(children, max_children)]
+  |                              ^^^^^^^^^^^^

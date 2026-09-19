@@ -3,10 +3,10 @@
 //! [`#[actor(...)]`](macro@crate::actor) selects one profile:
 //!
 //! - omitting `mailbox` selects [`Disabled`];
-//! - `mailbox` without `interleaved` selects [`Serial`];
-//! - fixed `interleaved` forms select [`Fixed`];
-//! - dynamic `interleaved` forms select [`Dynamic`];
-//! - unbounded `interleaved` selects [`Unbounded`].
+//! - `mailbox` without `max_in_flight` selects [`Fixed`];
+//! - fixed `max_in_flight` selects [`Fixed`];
+//! - dynamic `max_in_flight` selects [`Dynamic`];
+//! - unbounded `max_in_flight` selects [`Unbounded`].
 //!
 //! The macro reference documents syntax and defaults.
 //! Manual [`crate::MessageConfig`] implementations select a profile directly.
@@ -35,7 +35,7 @@ use crate::{
     mailbox::Control,
 };
 
-pub use profile::{Disabled, Dynamic, Fixed, SchedulerProfile, Serial, Unbounded};
+pub use profile::{Disabled, Dynamic, Fixed, SchedulerProfile, Unbounded};
 pub(crate) use runtime::{ActorScheduler, RuntimeScheduler, SchedulerTurn, TurnContext};
 pub(crate) use state::{
     DynamicLimit, FixedLimit, ReplyLane, ReplyProfile, ReplyState, UnboundedLimit,

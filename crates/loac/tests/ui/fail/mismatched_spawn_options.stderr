@@ -6,8 +6,8 @@ error[E0308]: mismatched types
    |             |
    |             arguments to this function are incorrect
    |
-   = note: expected struct `ActorOptions<Second, FixedMailbox, NoInterleaving, NoChildren>`
-              found struct `ActorOptions<First, FixedMailbox, NoInterleaving, NoChildren>`
+   = note: expected struct `ActorOptions<Second, FixedMailboxCapacity, FixedMaxInFlight, NoChildren>`
+              found struct `ActorOptions<First, FixedMailboxCapacity, FixedMaxInFlight, NoChildren>`
 note: function defined here
   --> src/runtime.rs
    |

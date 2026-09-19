@@ -30,7 +30,13 @@ mod message;
 ///
 /// struct Worker;
 ///
-/// #[actor(mailbox = dynamic, interleaved = dynamic, children = 4)]
+/// #[actor(
+///     mailbox,
+///     mailbox_capacity = dynamic,
+///     max_in_flight = dynamic,
+///     children,
+///     max_children = 4,
+/// )]
 /// impl Actor for Worker {
 ///     type SpawnArgs = ();
 ///
@@ -45,26 +51,32 @@ mod message;
 /// | Option | Purpose | Requires |
 /// | --- | --- | --- |
 /// | `mailbox` | Enables typed public messaging | Nothing |
-/// | `mailbox_budget = E` | Limits consecutive message dispatch | `mailbox` |
-/// | `interleaved` | Sets concurrent handler capacity | `mailbox` |
-/// | `children` | Enables direct child actor ownership | Nothing |
+/// | `mailbox_capacity = P` | Selects mailbox capacity | `mailbox` |
+/// | `mailbox_dispatch_budget = E` | Limits consecutive dispatch | `mailbox` |
+/// | `max_in_flight = P` | Limits active handlers | `mailbox` |
+/// | `children` | Enables direct child ownership | Nothing |
+/// | `max_children = P` | Limits retained children | `children` |
 ///
-/// `mailbox`, `interleaved`, and `children` share five forms:
+/// Capability flags accept no values.
+/// Quantity policies use these forms:
 ///
 /// | Form | Selected profile |
 /// | --- | --- |
-/// | bare option | Fixed limit of `32` |
-/// | `option = N` | Fixed limit of `N` |
-/// | `option = dynamic` | Per-spawn limit defaulting to `32` |
-/// | `option = dynamic(N)` | Per-spawn limit defaulting to `N` |
-/// | `option = unbounded` | No finite limit |
+/// | `N` | Fixed limit of `N` |
+/// | `dynamic` | Per-spawn limit using the library default |
+/// | `dynamic(N)` | Per-spawn limit defaulting to `N` |
+/// | `unbounded` | No finite limit |
 ///
 /// Every finite expression must produce a nonzero `usize` constant.
 /// Dynamic forms expose one method on [`SpawnOptions`][spawn-options]:
 ///
-/// - [`with_mailbox_capacity`][mailbox-builder] for `mailbox`;
-/// - [`with_max_in_flight`][interleaving-builder] for `interleaved`;
-/// - [`with_max_children`][children-builder] for `children`.
+/// - [`with_mailbox_capacity`][mailbox-builder] for `mailbox_capacity`;
+/// - [`with_max_in_flight`][max-in-flight-builder] for `max_in_flight`;
+/// - [`with_max_children`][children-builder] for `max_children`.
+///
+/// `mailbox_capacity = dynamic` defaults to `32`.
+/// `max_in_flight = dynamic` defaults to `32`.
+/// `max_children = dynamic` defaults to `32`.
 ///
 /// # Mailbox
 ///
@@ -72,13 +84,14 @@ mod message;
 /// It does not bound active replies.
 /// [`ActorRef::call`][call] and [`ActorRef::send`][send] wait when full.
 /// [`ActorRef::try_call`][try-call] and [`ActorRef::try_send`][try-send] return immediately.
-/// A mailbox without `interleaved` uses [`Serial`][serial].
+/// Omitting `mailbox_capacity` uses `32`.
+/// A mailbox without `max_in_flight` uses [`Fixed`][fixed] with `32`.
 /// Omitting `mailbox` removes public messaging methods.
 /// It selects zero-sized [`Disabled`][disabled].
 ///
 /// # Mailbox dispatch budget
 ///
-/// `mailbox_budget = E` accepts a nonzero `usize` const expression.
+/// `mailbox_dispatch_budget = E` accepts a nonzero `usize` const expression.
 /// It defaults to `16` when omitted.
 /// At most `E` messages dispatch before checking other actor work.
 /// This check does not force a Tokio task yield.
@@ -88,7 +101,7 @@ mod message;
 ///
 /// The limit counts active handler futures.
 /// At the limit, queued messages pause before handler dispatch.
-/// Omitting `interleaved` permits one active handler.
+/// Omitting `max_in_flight` permits `32` active handlers.
 /// The option requires `mailbox`.
 ///
 /// # Child actors
@@ -99,17 +112,18 @@ mod message;
 /// A finite rejection returns the original spawn input.
 /// Unbounded spawning uses [`Infallible`](std::convert::Infallible) as its error.
 /// Omitting `children` removes child actor spawning methods.
+/// Omitting `max_children` uses `32`.
 /// This option does not require `mailbox`.
 ///
 /// [actor-config]: https://docs.rs/loac/latest/loac/trait.ActorConfig.html
 /// [disabled]: https://docs.rs/loac/latest/loac/scheduling/struct.Disabled.html
 /// [message-config]: https://docs.rs/loac/latest/loac/trait.MessageConfig.html
-/// [serial]: https://docs.rs/loac/latest/loac/scheduling/struct.Serial.html
+/// [fixed]: https://docs.rs/loac/latest/loac/scheduling/struct.Fixed.html
 /// [supervision-config]: https://docs.rs/loac/latest/loac/trait.SupervisionConfig.html
 /// [spawn-options]: https://docs.rs/loac/latest/loac/type.SpawnOptions.html
-/// [mailbox-builder]: https://docs.rs/loac/latest/loac/trait.DynamicMailboxOptions.html#tymethod.with_mailbox_capacity
-/// [interleaving-builder]: https://docs.rs/loac/latest/loac/trait.DynamicInterleavingOptions.html#tymethod.with_max_in_flight
-/// [children-builder]: https://docs.rs/loac/latest/loac/trait.DynamicChildrenOptions.html#tymethod.with_max_children
+/// [mailbox-builder]: https://docs.rs/loac/latest/loac/trait.DynamicMailboxCapacityOptions.html#tymethod.with_mailbox_capacity
+/// [max-in-flight-builder]: https://docs.rs/loac/latest/loac/trait.DynamicMaxInFlightOptions.html#tymethod.with_max_in_flight
+/// [children-builder]: https://docs.rs/loac/latest/loac/trait.DynamicMaxChildrenOptions.html#tymethod.with_max_children
 /// [call]: https://docs.rs/loac/latest/loac/struct.ActorRef.html#method.call
 /// [send]: https://docs.rs/loac/latest/loac/struct.ActorRef.html#method.send
 /// [try-call]: https://docs.rs/loac/latest/loac/struct.ActorRef.html#method.try_call

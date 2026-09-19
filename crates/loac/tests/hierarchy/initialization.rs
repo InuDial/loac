@@ -24,7 +24,7 @@ struct SpawnDuringInitArgs {
     spawned: oneshot::Sender<ActorRef<LateChild>>,
 }
 
-#[actor(children = unbounded)]
+#[actor(children, max_children = unbounded)]
 impl Actor for SpawnDuringInit {
     type SpawnArgs = SpawnDuringInitArgs;
 
@@ -74,7 +74,7 @@ async fn stop_includes_children_spawned_during_init() {
 
 struct SpawnAfterKill;
 
-#[actor(children = unbounded)]
+#[actor(children, max_children = unbounded)]
 impl Actor for SpawnAfterKill {
     type SpawnArgs = oneshot::Sender<ActorRef<LateChild>>;
 

@@ -46,27 +46,6 @@ impl Disabled {
     }
 }
 
-/// Schedules one active reply at a time.
-pub struct Serial<A: Actor> {
-    pub(super) state: ReplyState<A, FixedLimit<1>>,
-}
-
-impl<A: Actor> Serial<A> {
-    /// Creates an empty serial profile.
-    #[must_use]
-    pub fn new() -> Self {
-        Self {
-            state: ReplyState::with_limit(FixedLimit),
-        }
-    }
-}
-
-impl<A: Actor> Default for Serial<A> {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
 /// Schedules at most `N` active handler futures.
 pub struct Fixed<A: Actor, const N: usize> {
     pub(super) state: ReplyState<A, FixedLimit<N>>,
@@ -132,15 +111,6 @@ where
     A: Actor + MessageConfig<Sender = NoSender, Inbox = NoInbox, Scheduler = Self>,
 {
     type Runtime = runtime::DisabledRuntime;
-}
-
-impl<A> SchedulerProfile<A> for Serial<A>
-where
-    A: Actor + MessageConfig<Scheduler = Self>,
-    A::Sender: MessageSender<A>,
-    A::Inbox: MessageInbox<A>,
-{
-    type Runtime = runtime::MailboxRuntime;
 }
 
 impl<A, const N: usize> SchedulerProfile<A> for Fixed<A, N>

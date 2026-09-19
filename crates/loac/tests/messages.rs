@@ -22,12 +22,12 @@ use tokio::sync::oneshot;
 
 use support::lock;
 
-struct SerialActor {
+struct MailboxActor {
     committed: Arc<Mutex<Vec<u8>>>,
 }
 
-#[actor(mailbox = dynamic, interleaved)]
-impl Actor for SerialActor {
+#[actor(mailbox, mailbox_capacity = dynamic)]
+impl Actor for MailboxActor {
     type SpawnArgs = Arc<Mutex<Vec<u8>>>;
 
     async fn init(committed: Self::SpawnArgs, _scope: &mut ActorScope<'_, Self>) -> Self {
@@ -42,7 +42,7 @@ struct Block {
     release: oneshot::Receiver<()>,
 }
 
-impl Handler<Block> for SerialActor {
+impl Handler<Block> for MailboxActor {
     async fn handle(message: Block, mut cx: Cx<'_, Self>) {
         let _guard = cx.exclusive();
         let _ = message.entered.send(());
@@ -54,7 +54,7 @@ impl Handler<Block> for SerialActor {
 #[message(reply = u8)]
 struct Record(u8);
 
-impl Handler<Record> for SerialActor {
+impl Handler<Record> for MailboxActor {
     async fn handle(message: Record, mut cx: Cx<'_, Self>) -> u8 {
         cx.with(|actor, _| lock(&actor.committed).push(message.0));
         message.0
@@ -65,13 +65,13 @@ impl Handler<Record> for SerialActor {
 #[message(reply = ())]
 struct Notify(u8);
 
-impl Handler<Notify> for SerialActor {
+impl Handler<Notify> for MailboxActor {
     async fn handle(message: Notify, mut cx: Cx<'_, Self>) {
         cx.with(|actor, _| lock(&actor.committed).push(message.0));
     }
 }
 
-fn single_slot_options() -> SpawnOptions<SerialActor> {
+fn single_slot_options() -> SpawnOptions<MailboxActor> {
     let one = NonZeroUsize::new(1).expect("one is non-zero");
-    SpawnOptions::<SerialActor>::default().with_mailbox_capacity(one)
+    SpawnOptions::<MailboxActor>::default().with_mailbox_capacity(one)
 }

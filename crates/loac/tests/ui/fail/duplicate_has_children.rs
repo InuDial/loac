@@ -2,7 +2,7 @@ use loac::{Actor, ActorScope, HasChildren};
 
 struct Supervisor;
 
-#[loac::actor(children = unbounded)]
+#[loac::actor(children, max_children = unbounded)]
 impl Actor for Supervisor {
     type SpawnArgs = ();
 

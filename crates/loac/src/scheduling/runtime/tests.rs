@@ -11,7 +11,7 @@ use std::{
 use crate::{
     Actor, ActorConfig, ActorScope, MessageConfig,
     mailbox::{ActorInner, Mode},
-    scheduling::{Fixed, ReplyProfile, ScheduledFuture, Serial},
+    scheduling::{Fixed, ReplyProfile, ScheduledFuture},
 };
 
 use super::RuntimeScheduler;
@@ -27,10 +27,10 @@ impl Actor for DisabledActor {
     }
 }
 
-struct SerialActor;
+struct DefaultActor;
 
-#[crate::actor(mailbox = 1)]
-impl Actor for SerialActor {
+#[crate::actor(mailbox, mailbox_capacity = 1)]
+impl Actor for DefaultActor {
     type SpawnArgs = ();
 
     async fn init(_: (), _: &mut ActorScope<'_, Self>) -> Self {
@@ -40,7 +40,7 @@ impl Actor for SerialActor {
 
 struct FixedActor;
 
-#[crate::actor(mailbox = 1, interleaved = 2)]
+#[crate::actor(mailbox, mailbox_capacity = 1, max_in_flight = 2)]
 impl Actor for FixedActor {
     type SpawnArgs = ();
 
@@ -51,7 +51,7 @@ impl Actor for FixedActor {
 
 struct DynamicActor;
 
-#[crate::actor(mailbox = 1, interleaved = dynamic(2))]
+#[crate::actor(mailbox, mailbox_capacity = 1, max_in_flight = dynamic(2))]
 impl Actor for DynamicActor {
     type SpawnArgs = ();
 
@@ -62,7 +62,7 @@ impl Actor for DynamicActor {
 
 struct UnboundedActor;
 
-#[crate::actor(mailbox = 1, interleaved = unbounded)]
+#[crate::actor(mailbox, mailbox_capacity = 1, max_in_flight = unbounded)]
 impl Actor for UnboundedActor {
     type SpawnArgs = ();
 
@@ -75,7 +75,7 @@ impl Actor for UnboundedActor {
 fn every_mailbox_profile_owns_reply_state() {
     assert_eq!(size_of::<<DisabledActor as MessageConfig>::Scheduler>(), 0);
     assert_eq!(
-        size_of::<Serial<SerialActor>>(),
+        size_of::<<DefaultActor as MessageConfig>::Scheduler>(),
         size_of::<Fixed<FixedActor, 2>>()
     );
 }

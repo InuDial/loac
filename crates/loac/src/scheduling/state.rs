@@ -2,7 +2,7 @@ use std::{marker::PhantomData, num::NonZeroUsize};
 
 use crate::Actor;
 
-use super::{Dynamic, Fixed, ScheduledFuture, Serial, Unbounded, queue::Queue};
+use super::{Dynamic, Fixed, ScheduledFuture, Unbounded, queue::Queue};
 
 pub(crate) struct ReplyState<A: Actor, L> {
     pub(super) queue: Queue,
@@ -15,14 +15,6 @@ pub(crate) trait ReplyProfile<A: Actor>: Send + 'static {
     type Limit: LimitPolicy;
 
     fn state(&mut self) -> &mut ReplyState<A, Self::Limit>;
-}
-
-impl<A: Actor> ReplyProfile<A> for Serial<A> {
-    type Limit = FixedLimit<1>;
-
-    fn state(&mut self) -> &mut ReplyState<A, Self::Limit> {
-        &mut self.state
-    }
 }
 
 impl<A: Actor, const N: usize> ReplyProfile<A> for Fixed<A, N> {

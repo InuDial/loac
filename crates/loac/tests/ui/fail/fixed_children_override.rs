@@ -2,7 +2,7 @@ use std::num::NonZeroUsize;
 
 struct Fixed;
 
-#[loac::actor(children = 8)]
+#[loac::actor(children, max_children = 8)]
 impl loac::Actor for Fixed {
     type SpawnArgs = ();
 

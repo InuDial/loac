@@ -5,10 +5,10 @@ mod tests;
 
 pub use options::{
     ActorOptions, DEFAULT_MAILBOX_CAPACITY, DEFAULT_MAX_CHILDREN, DEFAULT_MAX_IN_FLIGHT,
-    DynamicChildren, DynamicChildrenOptions, DynamicInterleaving, DynamicInterleavingOptions,
-    DynamicMailbox, DynamicMailboxOptions, FixedChildren, FixedInterleaving, FixedMailbox,
-    NoChildren, NoInterleaving, NoMailbox, UnboundedChildren, UnboundedInterleaving,
-    UnboundedMailbox,
+    DynamicMailboxCapacity, DynamicMailboxCapacityOptions, DynamicMaxChildren,
+    DynamicMaxChildrenOptions, DynamicMaxInFlight, DynamicMaxInFlightOptions, FixedMailboxCapacity,
+    FixedMaxChildren, FixedMaxInFlight, NoChildren, NoMailbox, NoMaxInFlight,
+    UnboundedMailboxCapacity, UnboundedMaxChildren, UnboundedMaxInFlight,
 };
 
 /// Spawn configuration selected by one actor type.

@@ -1,0 +1,5 @@
+error: `mailbox` accepts no value; configure `mailbox_capacity`
+ --> tests/ui/actor/fail/mailbox_value.rs:3:20
+  |
+3 | #[actor_api::actor(mailbox = 8)]
+  |                    ^^^^^^^

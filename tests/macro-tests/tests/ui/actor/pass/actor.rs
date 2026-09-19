@@ -27,7 +27,7 @@ impl Actor for Bare {
 
 struct Messaging;
 
-#[actor_api::actor(mailbox = 8, mailbox_budget = 3)]
+#[actor_api::actor(mailbox, mailbox_capacity = 8, mailbox_dispatch_budget = 3)]
 impl Actor for Messaging {
     type SpawnArgs = ();
 
@@ -38,7 +38,7 @@ impl Actor for Messaging {
 
 struct Supervisor;
 
-#[actor_api::actor(children = unbounded)]
+#[actor_api::actor(children, max_children = unbounded)]
 impl Actor for Supervisor {
     type SpawnArgs = ();
 
@@ -49,7 +49,7 @@ impl Actor for Supervisor {
 
 struct FixedSupervisor;
 
-#[actor_api::actor(children = 8)]
+#[actor_api::actor(children, max_children = 8)]
 impl Actor for FixedSupervisor {
     type SpawnArgs = ();
 
@@ -60,7 +60,7 @@ impl Actor for FixedSupervisor {
 
 struct DynamicSupervisor;
 
-#[actor_api::actor(children = dynamic)]
+#[actor_api::actor(children, max_children = dynamic)]
 impl Actor for DynamicSupervisor {
     type SpawnArgs = ();
 
@@ -69,10 +69,10 @@ impl Actor for DynamicSupervisor {
     }
 }
 
-struct DynamicMailbox;
+struct DynamicMailboxCapacity;
 
-#[actor_api::actor(mailbox = dynamic)]
-impl Actor for DynamicMailbox {
+#[actor_api::actor(mailbox, mailbox_capacity = dynamic)]
+impl Actor for DynamicMailboxCapacity {
     type SpawnArgs = ();
 
     async fn init(_: (), _: &mut ActorScope<'_, Self>) -> Self {
@@ -80,10 +80,10 @@ impl Actor for DynamicMailbox {
     }
 }
 
-struct UnboundedMailbox;
+struct UnboundedMailboxCapacity;
 
-#[actor_api::actor(mailbox = unbounded)]
-impl Actor for UnboundedMailbox {
+#[actor_api::actor(mailbox, mailbox_capacity = unbounded)]
+impl Actor for UnboundedMailboxCapacity {
     type SpawnArgs = ();
 
     async fn init(_: (), _: &mut ActorScope<'_, Self>) -> Self {
@@ -91,10 +91,10 @@ impl Actor for UnboundedMailbox {
     }
 }
 
-struct UnboundedInterleaved;
+struct UnboundedMaxInFlight;
 
-#[actor_api::actor(mailbox, interleaved = unbounded)]
-impl Actor for UnboundedInterleaved {
+#[actor_api::actor(mailbox, max_in_flight = unbounded)]
+impl Actor for UnboundedMaxInFlight {
     type SpawnArgs = ();
 
     async fn init(_: (), _: &mut ActorScope<'_, Self>) -> Self {
@@ -104,7 +104,7 @@ impl Actor for UnboundedInterleaved {
 
 struct DefaultCapabilities;
 
-#[actor_api::actor(mailbox, children, interleaved)]
+#[actor_api::actor(mailbox, children)]
 impl Actor for DefaultCapabilities {
     type SpawnArgs = ();
 
@@ -114,7 +114,7 @@ impl Actor for DefaultCapabilities {
 }
 
 const MAILBOX_CAPACITY: usize = 16;
-const MAILBOX_BUDGET: usize = 5;
+const MAILBOX_DISPATCH_BUDGET: usize = 5;
 
 mod limits {
     pub const CHILD_CAPACITY: usize = 8;
@@ -123,10 +123,10 @@ mod limits {
 struct Combined;
 
 #[actor_api::actor(
-    mailbox = MAILBOX_CAPACITY,
-    mailbox_budget = MAILBOX_BUDGET,
-    interleaved = 1 << 2,
-    children = dynamic(limits::CHILD_CAPACITY),
+    mailbox, mailbox_capacity = MAILBOX_CAPACITY,
+    mailbox_dispatch_budget = MAILBOX_DISPATCH_BUDGET,
+    max_in_flight = 1 << 2,
+    children, max_children = dynamic(limits::CHILD_CAPACITY),
 )]
 impl Actor for Combined {
     type SpawnArgs = ();
@@ -139,10 +139,10 @@ impl Actor for Combined {
 struct Generic<T, const N: usize>(T);
 
 #[actor_api::actor(
-    mailbox = dynamic(N),
-    mailbox_budget = N,
-    interleaved = dynamic(N),
-    children = N,
+    mailbox, mailbox_capacity = dynamic(N),
+    mailbox_dispatch_budget = N,
+    max_in_flight = dynamic(N),
+    children, max_children = N,
 )]
 impl<T, const N: usize> Actor for Generic<T, N>
 where
@@ -161,7 +161,7 @@ struct Conditional;
 
 struct ConditionalAttribute;
 
-#[actor_api::actor(mailbox = dynamic)]
+#[actor_api::actor(mailbox, mailbox_capacity = dynamic)]
 #[cfg(any())]
 impl Actor for Conditional {
     type SpawnArgs = ();
@@ -172,7 +172,7 @@ impl Actor for Conditional {
 }
 
 #[cfg_attr(any(), cfg(any()))]
-#[actor_api::actor(mailbox = unbounded)]
+#[actor_api::actor(mailbox, mailbox_capacity = unbounded)]
 impl Actor for ConditionalAttribute {
     type SpawnArgs = ();
 
@@ -184,15 +184,15 @@ impl Actor for ConditionalAttribute {
 fn override_mailbox_capacity<A>(options: A::Options) -> A::Options
 where
     A: ActorConfig,
-    A::Options: DynamicMailboxOptions,
+    A::Options: DynamicMailboxCapacityOptions,
 {
     options.with_mailbox_capacity(NonZeroUsize::MIN)
 }
 
-fn override_interleaving<A>(options: A::Options) -> A::Options
+fn override_max_in_flight<A>(options: A::Options) -> A::Options
 where
     A: ActorConfig,
-    A::Options: DynamicInterleavingOptions,
+    A::Options: DynamicMaxInFlightOptions,
 {
     options.with_max_in_flight(NonZeroUsize::MIN)
 }
@@ -201,7 +201,7 @@ fn main() {
     assert_same::<<Bare as MessageConfig>::Scheduler, actor_api::scheduling::Disabled>();
     assert_same::<
         <Messaging as MessageConfig>::Scheduler,
-        actor_api::scheduling::Serial<Messaging>,
+        actor_api::scheduling::Fixed<Messaging, 32>,
     >();
     assert_same::<
         <DefaultCapabilities as MessageConfig>::Scheduler,
@@ -212,28 +212,31 @@ fn main() {
         actor_api::scheduling::Dynamic<Generic<u8, 6>>,
     >();
     assert_same::<
-        <UnboundedMailbox as MessageConfig>::Sender,
-        actor_api::transport::UnboundedSender<UnboundedMailbox>,
+        <UnboundedMailboxCapacity as MessageConfig>::Sender,
+        actor_api::transport::UnboundedSender<UnboundedMailboxCapacity>,
     >();
     assert_same::<
-        <UnboundedMailbox as MessageConfig>::Inbox,
-        actor_api::transport::UnboundedInbox<UnboundedMailbox>,
+        <UnboundedMailboxCapacity as MessageConfig>::Inbox,
+        actor_api::transport::UnboundedInbox<UnboundedMailboxCapacity>,
     >();
     assert_same::<
-        <UnboundedInterleaved as MessageConfig>::Scheduler,
-        actor_api::scheduling::Unbounded<UnboundedInterleaved>,
+        <UnboundedMaxInFlight as MessageConfig>::Scheduler,
+        actor_api::scheduling::Unbounded<UnboundedMaxInFlight>,
     >();
 
     assert_eq!(Messaging::MAILBOX_DISPATCH_BUDGET.get(), 3);
-    assert_eq!(Combined::MAILBOX_DISPATCH_BUDGET.get(), MAILBOX_BUDGET);
+    assert_eq!(
+        Combined::MAILBOX_DISPATCH_BUDGET.get(),
+        MAILBOX_DISPATCH_BUDGET
+    );
     assert_eq!(Generic::<u8, 6>::MAILBOX_DISPATCH_BUDGET.get(), 6);
 
-    let _ = actor_api::SpawnOptions::<DynamicMailbox>::default()
+    let _ = actor_api::SpawnOptions::<DynamicMailboxCapacity>::default()
         .with_mailbox_capacity(NonZeroUsize::MIN);
     let _ = override_mailbox_capacity::<Generic<u8, 6>>(
         actor_api::SpawnOptions::<Generic<u8, 6>>::default(),
     );
-    let _ = override_interleaving::<Generic<u8, 6>>(
+    let _ = override_max_in_flight::<Generic<u8, 6>>(
         actor_api::SpawnOptions::<Generic<u8, 6>>::default(),
     );
     let _ = actor_api::SpawnOptions::<DynamicSupervisor>::default()

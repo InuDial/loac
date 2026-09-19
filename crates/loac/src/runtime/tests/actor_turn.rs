@@ -93,10 +93,10 @@ impl ActorTurnFixture<TestActor> {
     }
 }
 
-struct SerialActor;
+struct DefaultActor;
 
-#[crate::actor(mailbox = dynamic, mailbox_budget = 3, children = 1)]
-impl Actor for SerialActor {
+#[crate::actor(mailbox, mailbox_capacity = dynamic, mailbox_dispatch_budget = 3, children, max_children = 1)]
+impl Actor for DefaultActor {
     type SpawnArgs = ();
 
     async fn init(_: (), _: &mut ActorScope<'_, Self>) -> Self {
@@ -104,13 +104,13 @@ impl Actor for SerialActor {
     }
 }
 
-impl ActorTurnFixture<SerialActor> {
-    fn new_serial(mailbox_capacity: usize) -> Self {
+impl ActorTurnFixture<DefaultActor> {
+    fn new_default(mailbox_capacity: usize) -> Self {
         let capacity = NonZeroUsize::new(mailbox_capacity).expect("test capacity is nonzero");
         let options =
-            <SerialActor as ActorConfig>::Options::default().with_mailbox_capacity(capacity);
+            <DefaultActor as ActorConfig>::Options::default().with_mailbox_capacity(capacity);
         let (inner, inbox, scheduler) = ActorInner::open(&options);
-        Self::from_parts(SerialActor, inner, inbox, scheduler)
+        Self::from_parts(DefaultActor, inner, inbox, scheduler)
     }
 }
 
@@ -291,7 +291,7 @@ async fn completed_leased_drop_panic_is_contained_after_removal() {
 // Drain inherits the running cursor and dispatch budget.
 // Other lanes must win before its mailbox batch resumes.
 #[tokio::test]
-async fn drain_rotates_then_uses_the_configured_mailbox_budget() {
+async fn drain_rotates_then_uses_the_configured_mailbox_dispatch_budget() {
     let mailbox_dispatch_budget = <TestActor as MessageConfig>::MAILBOX_DISPATCH_BUDGET.get();
     let dispatched = Arc::new(AtomicUsize::new(0));
     let mut fixture =
@@ -339,13 +339,13 @@ async fn drain_rotates_then_uses_the_configured_mailbox_budget() {
     assert!(!fixture.inbox.is_empty());
 }
 
-// Serial Drain inherits the running mailbox-child cursor.
+// Drain inherits the running mailbox-child cursor.
 // The queued child must win before mailbox dispatch resumes.
 #[tokio::test]
-async fn serial_drain_inherits_cursor_before_resuming_mailbox() {
-    let mailbox_dispatch_budget = <SerialActor as MessageConfig>::MAILBOX_DISPATCH_BUDGET.get();
+async fn drain_inherits_cursor_before_resuming_mailbox() {
+    let mailbox_dispatch_budget = <DefaultActor as MessageConfig>::MAILBOX_DISPATCH_BUDGET.get();
     let dispatched = Arc::new(AtomicUsize::new(0));
-    let mut fixture = ActorTurnFixture::<SerialActor>::new_serial(mailbox_dispatch_budget + 2);
+    let mut fixture = ActorTurnFixture::<DefaultActor>::new_default(mailbox_dispatch_budget + 2);
     fixture.access.state().children.publish(ChildExit::new(
         ChildId::invalid_for_test(),
         ExitStatus::new(ExitReason::Stopped, SubtreeStatus::Terminated),

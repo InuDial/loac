@@ -13,7 +13,7 @@ use tokio::sync::oneshot;
 
 struct Counter(u64);
 
-#[actor(mailbox, interleaved)]
+#[actor(mailbox)]
 impl Actor for Counter {
     type SpawnArgs = u64;
 

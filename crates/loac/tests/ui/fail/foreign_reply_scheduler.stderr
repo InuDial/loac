@@ -9,12 +9,34 @@ help: the trait `SchedulerProfile<ForeignActor>` is not implemented for `Foreign
    |
  8 | struct ForeignScheduler;
    | ^^^^^^^^^^^^^^^^^^^^^^^
-   = help: the following other types implement trait `SchedulerProfile<A>`:
-             Serial<A>
-             loac::scheduling::Disabled
-             loac::scheduling::Dynamic<A>
-             loac::scheduling::Fixed<A, N>
-             loac::scheduling::Unbounded<A>
+help: the following other types implement trait `SchedulerProfile<A>`
+  --> src/scheduling/profile.rs
+   |
+   | / impl<A> SchedulerProfile<A> for Disabled
+   | | where
+   | |     A: Actor + MessageConfig<Sender = NoSender, Inbox = NoInbox, Scheduler = Self>,
+   | |___________________________________________________________________________________^ `loac::scheduling::Disabled`
+...
+   | / impl<A, const N: usize> SchedulerProfile<A> for Fixed<A, N>
+   | | where
+   | |     A: Actor + MessageConfig<Scheduler = Self>,
+   | |     A::Sender: MessageSender<A>,
+   | |     A::Inbox: MessageInbox<A>,
+   | |______________________________^ `loac::scheduling::Fixed<A, N>`
+...
+   | / impl<A> SchedulerProfile<A> for Dynamic<A>
+   | | where
+   | |     A: Actor + MessageConfig<Scheduler = Self>,
+   | |     A::Sender: MessageSender<A>,
+   | |     A::Inbox: MessageInbox<A>,
+   | |______________________________^ `loac::scheduling::Dynamic<A>`
+...
+   | / impl<A> SchedulerProfile<A> for Unbounded<A>
+   | | where
+   | |     A: Actor + MessageConfig<Scheduler = Self>,
+   | |     A::Sender: MessageSender<A>,
+   | |     A::Inbox: MessageInbox<A>,
+   | |______________________________^ `loac::scheduling::Unbounded<A>`
 note: required by a bound in `Actor`
   --> src/actor.rs
    |

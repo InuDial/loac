@@ -46,7 +46,7 @@ struct DrainParentArgs {
     worker_started: oneshot::Sender<ActorRef<Worker>>,
 }
 
-#[actor(mailbox, interleaved, children = unbounded)]
+#[actor(mailbox, children, max_children = unbounded)]
 impl Actor for DrainParent {
     type SpawnArgs = DrainParentArgs;
 

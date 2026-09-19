@@ -20,7 +20,7 @@ pub(super) struct LifecycleArgs {
     cleanup: Arc<Mutex<Vec<ExitReason>>>,
 }
 
-#[actor(mailbox = dynamic, interleaved)]
+#[actor(mailbox, mailbox_capacity = dynamic)]
 impl Actor for LifecycleActor {
     type SpawnArgs = LifecycleArgs;
 

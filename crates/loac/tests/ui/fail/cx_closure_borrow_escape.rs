@@ -2,7 +2,7 @@ use loac::prelude::*;
 
 struct Worker(usize);
 
-#[actor(mailbox, interleaved)]
+#[actor(mailbox)]
 impl Actor for Worker {
     type SpawnArgs = ();
 

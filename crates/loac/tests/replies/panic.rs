@@ -2,7 +2,7 @@ use super::*;
 
 struct PanicActor;
 
-#[actor(mailbox, interleaved = 2)]
+#[actor(mailbox, max_in_flight = 2)]
 impl Actor for PanicActor {
     type SpawnArgs = ();
 
@@ -13,7 +13,7 @@ impl Actor for PanicActor {
 
 struct CxPanicActor;
 
-#[actor(mailbox, interleaved)]
+#[actor(mailbox)]
 impl Actor for CxPanicActor {
     type SpawnArgs = ();
 

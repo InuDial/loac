@@ -31,7 +31,7 @@ impl Actor for IdleChild {
 
 struct FixedParent;
 
-#[actor(children = 1)]
+#[actor(children, max_children = 1)]
 impl Actor for FixedParent {
     type SpawnArgs = oneshot::Sender<usize>;
 
@@ -62,7 +62,7 @@ async fn fixed_capacity_returns_rejected_spawn_args() {
 
 struct DynamicParent;
 
-#[actor(children = dynamic(2))]
+#[actor(children, max_children = dynamic(2))]
 impl Actor for DynamicParent {
     type SpawnArgs = oneshot::Sender<(usize, Vec<usize>)>;
 
@@ -97,7 +97,7 @@ async fn dynamic_capacity_is_enforced_at_runtime() {
 
 struct UnboundedParent;
 
-#[actor(children = unbounded)]
+#[actor(children, max_children = unbounded)]
 impl Actor for UnboundedParent {
     type SpawnArgs = oneshot::Sender<usize>;
 
@@ -177,7 +177,7 @@ impl Actor for PreparationProbe {
 
 struct PreparationParent;
 
-#[actor(children = 1)]
+#[actor(children, max_children = 1)]
 impl Actor for PreparationParent {
     type SpawnArgs = oneshot::Sender<(usize, bool, usize, usize)>;
 
@@ -235,7 +235,7 @@ struct RestartingParent {
     replacement: Option<oneshot::Sender<bool>>,
 }
 
-#[actor(children = 1)]
+#[actor(children, max_children = 1)]
 impl Actor for RestartingParent {
     type SpawnArgs = oneshot::Sender<bool>;
 

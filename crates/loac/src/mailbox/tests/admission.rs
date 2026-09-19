@@ -20,7 +20,7 @@ use super::{PanicWake, WakeCounter};
 
 struct TestActor;
 
-#[crate::actor(mailbox = 1)]
+#[crate::actor(mailbox, mailbox_capacity = 1)]
 impl Actor for TestActor {
     type SpawnArgs = ();
 
@@ -31,7 +31,7 @@ impl Actor for TestActor {
 
 struct UnboundedTestActor;
 
-#[crate::actor(mailbox = unbounded)]
+#[crate::actor(mailbox, mailbox_capacity = unbounded)]
 impl Actor for UnboundedTestActor {
     type SpawnArgs = ();
 

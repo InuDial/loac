@@ -1,0 +1,5 @@
+error: `children` accepts no value; configure `max_children`
+ --> tests/ui/actor/fail/children_value.rs:3:20
+  |
+3 | #[actor_api::actor(children = 8)]
+  |                    ^^^^^^^^

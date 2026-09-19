@@ -3,7 +3,7 @@ use std::num::NonZeroUsize;
 // Fixed mailbox capacity cannot change for one spawn.
 struct Fixed;
 
-#[loac::actor(mailbox = 8)]
+#[loac::actor(mailbox, mailbox_capacity = 8)]
 impl loac::Actor for Fixed {
     type SpawnArgs = ();
 

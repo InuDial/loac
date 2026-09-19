@@ -1,0 +1,5 @@
+error: `max_in_flight` requires `= <limit>`
+ --> tests/ui/actor/fail/key_only_max_in_flight.rs:3:29
+  |
+3 | #[actor_api::actor(mailbox, max_in_flight)]
+  |                             ^^^^^^^^^^^^^

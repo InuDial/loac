@@ -8,7 +8,7 @@ use super::support::watchdog;
 
 struct StreamActor;
 
-#[actor(mailbox, interleaved = unbounded)]
+#[actor(mailbox)]
 impl Actor for StreamActor {
     type SpawnArgs = ();
 

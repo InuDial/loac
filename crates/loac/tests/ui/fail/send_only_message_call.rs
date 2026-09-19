@@ -3,7 +3,7 @@ use loac::{Actor, ActorScope, Cx, Handler};
 
 struct Echo;
 
-#[loac::actor(mailbox, interleaved = unbounded)]
+#[loac::actor(mailbox)]
 impl Actor for Echo {
     type SpawnArgs = ();
 

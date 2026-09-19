@@ -53,7 +53,7 @@ struct LeaseHookArgs {
     observation: oneshot::Sender<(Shutdown, usize)>,
 }
 
-#[actor(mailbox, interleaved)]
+#[actor(mailbox)]
 impl Actor for LeaseHookActor {
     type SpawnArgs = LeaseHookArgs;
 
@@ -221,7 +221,7 @@ async fn drain_runs_the_fixed_accepted_queue_in_order() {
 
 struct ConcurrentDrainActor;
 
-#[actor(mailbox = 3, interleaved = 2)]
+#[actor(mailbox, mailbox_capacity = 3, max_in_flight = 2)]
 impl Actor for ConcurrentDrainActor {
     type SpawnArgs = ();
 

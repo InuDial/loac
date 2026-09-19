@@ -2,7 +2,7 @@ use super::*;
 
 struct StopActor;
 
-#[actor(mailbox = 4, interleaved = 3)]
+#[actor(mailbox, mailbox_capacity = 4, max_in_flight = 3)]
 impl Actor for StopActor {
     type SpawnArgs = ();
 

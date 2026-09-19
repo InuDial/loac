@@ -2,7 +2,7 @@ use std::num::NonZeroUsize;
 
 struct Unbounded;
 
-#[loac::actor(mailbox = unbounded)]
+#[loac::actor(mailbox, mailbox_capacity = unbounded)]
 impl loac::Actor for Unbounded {
     type SpawnArgs = ();
 

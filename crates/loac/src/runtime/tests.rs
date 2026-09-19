@@ -40,10 +40,10 @@ mod work;
 struct TestActor;
 
 #[crate::actor(
-    mailbox = dynamic,
-    mailbox_budget = 3,
-    interleaved = dynamic,
-    children = 1
+    mailbox, mailbox_capacity = dynamic,
+    mailbox_dispatch_budget = 3,
+    max_in_flight = dynamic,
+    children, max_children = 1
 )]
 impl Actor for TestActor {
     type SpawnArgs = ();
@@ -75,7 +75,7 @@ fn enqueue_test_envelope<A: HasMailbox>(
 
 struct UnboundedTestActor;
 
-#[crate::actor(mailbox = unbounded)]
+#[crate::actor(mailbox, mailbox_capacity = unbounded)]
 impl Actor for UnboundedTestActor {
     type SpawnArgs = ();
 
@@ -217,7 +217,7 @@ impl Drop for ReadyActorWorkFrame {
 
 struct CountChildExit(Arc<AtomicUsize>);
 
-#[crate::actor(children = 1)]
+#[crate::actor(children, max_children = 1)]
 impl Actor for CountChildExit {
     type SpawnArgs = Arc<AtomicUsize>;
 
@@ -234,7 +234,7 @@ struct AbortChildParent {
     child_exit: Option<oneshot::Sender<ExitStatus>>,
 }
 
-#[crate::actor(mailbox = 1, children = 1)]
+#[crate::actor(mailbox, mailbox_capacity = 1, children, max_children = 1)]
 impl Actor for AbortChildParent {
     type SpawnArgs = oneshot::Sender<ExitStatus>;
 
@@ -281,7 +281,7 @@ struct ControlledChildExit {
     completed: Option<oneshot::Sender<()>>,
 }
 
-#[crate::actor(children = 1)]
+#[crate::actor(children, max_children = 1)]
 impl Actor for ControlledChildExit {
     type SpawnArgs = Self;
 

@@ -49,7 +49,7 @@ struct LoongActor {
     handled: u64,
 }
 
-#[loac::actor(mailbox = MAILBOX_CAPACITY)]
+#[loac::actor(mailbox, mailbox_capacity = MAILBOX_CAPACITY)]
 impl Actor for LoongActor {
     type SpawnArgs = ();
 

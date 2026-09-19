@@ -1,0 +1,5 @@
+error: duplicate `max_in_flight` option
+ --> tests/ui/actor/fail/duplicate_max_in_flight.rs:4:48
+  |
+4 | #[actor_api::actor(mailbox, max_in_flight = 8, max_in_flight = unbounded)]
+  |                                                ^^^^^^^^^^^^^

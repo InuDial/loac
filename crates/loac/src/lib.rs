@@ -20,7 +20,7 @@
 //!
 //! struct Counter(u64);
 //!
-//! #[actor(mailbox, interleaved = unbounded)]
+//! #[actor(mailbox)]
 //! impl Actor for Counter {
 //!     type SpawnArgs = u64;
 //!
@@ -67,22 +67,24 @@
 //! They are [`Sender`](MessageConfig::Sender), [`Inbox`](MessageConfig::Inbox),
 //! and [`Scheduler`](MessageConfig::Scheduler).
 //! Without `mailbox`, the scheduler is [`Disabled`](scheduling::Disabled).
-//! Without `interleaved`, a mailbox uses [`Serial`](scheduling::Serial).
+//! Without `max_in_flight`, a mailbox uses [`Fixed`](scheduling::Fixed).
 //!
 //! | Option | Purpose | When omitted |
 //! | --- | --- | --- |
 //! | `mailbox` | Enables typed [`send`](ActorRef::send) and [`call`](ActorRef::call) | Messaging methods are unavailable |
-//! | `mailbox_budget = E` | Limits consecutive message dispatch | Uses `16` with a mailbox |
-//! | `interleaved` | Sets concurrent handler capacity | Uses one active handler |
+//! | `mailbox_capacity = P` | Selects mailbox capacity | Uses `32` |
+//! | `mailbox_dispatch_budget = E` | Limits consecutive message dispatch | Uses `16` with a mailbox |
+//! | `max_in_flight = P` | Limits active handlers | Uses `32` |
 //! | `children` | Enables [`spawn_child`](ActorScope::spawn_child) | The method is unavailable |
+//! | `max_children = P` | Limits retained children | Uses `32` |
 //!
-//! These options support fixed, dynamic, and unbounded limits.
-//! Those profiles are fixed, dynamic, and unbounded.
+//! Capability flags accept no values.
+//! Quantity policies support fixed, dynamic, and unbounded limits.
 //! Dynamic profiles expose spawn-specific overrides:
 //!
-//! - [`with_mailbox_capacity`](DynamicMailboxOptions::with_mailbox_capacity);
-//! - [`with_max_in_flight`](DynamicInterleavingOptions::with_max_in_flight);
-//! - [`with_max_children`](DynamicChildrenOptions::with_max_children).
+//! - [`with_mailbox_capacity`](DynamicMailboxCapacityOptions::with_mailbox_capacity);
+//! - [`with_max_in_flight`](DynamicMaxInFlightOptions::with_max_in_flight);
+//! - [`with_max_children`](DynamicMaxChildrenOptions::with_max_children).
 //!
 //! Pass changed [`SpawnOptions`] to [`spawn_with`].
 //!
@@ -145,7 +147,7 @@
 //! Every handler returns one future.
 //! The actor task owns and polls every handler future.
 //! Mailbox configuration limits active handler futures.
-//! Omitting `interleaved` permits one active handler.
+//! Omitting `max_in_flight` permits `32` active handlers.
 //! A cx future accesses actor state through [`Cx::with`].
 //! [`Cx::exclusive`] returns a scoped scheduler lease.
 //! All scheduled actor work pauses until that guard drops.
@@ -237,8 +239,8 @@ pub use access::{Cx, ExclusiveGuard};
 pub use actor::{Actor, Handler, HasChildren, HasMailbox, HasReply, Message, StreamHandler};
 pub use address::{ActorRef, Recipient, Response};
 pub use config::{
-    ActorConfig, DynamicChildrenOptions, DynamicInterleavingOptions, DynamicMailboxOptions,
-    SupervisionConfig,
+    ActorConfig, DynamicMailboxCapacityOptions, DynamicMaxChildrenOptions,
+    DynamicMaxInFlightOptions, SupervisionConfig,
 };
 pub use error::{
     CallError, SendError, SendToError, TryCallError, TryCallErrorKind, TrySendError,
@@ -259,9 +261,9 @@ pub use writer::{StreamOut, Writer};
 // The root re-export keeps rustc diagnostics free of `__private` paths.
 #[doc(hidden)]
 pub use config::{
-    ActorOptions, DynamicChildren, DynamicInterleaving, DynamicMailbox, FixedChildren,
-    FixedInterleaving, FixedMailbox, NoChildren, NoInterleaving, NoMailbox, UnboundedChildren,
-    UnboundedInterleaving, UnboundedMailbox,
+    ActorOptions, DynamicMailboxCapacity, DynamicMaxChildren, DynamicMaxInFlight,
+    FixedMailboxCapacity, FixedMaxChildren, FixedMaxInFlight, NoChildren, NoMailbox, NoMaxInFlight,
+    UnboundedMailboxCapacity, UnboundedMaxChildren, UnboundedMaxInFlight,
 };
 
 /// Implementation details used by generated actor configuration.
@@ -269,9 +271,9 @@ pub use config::{
 pub mod __private {
     pub use crate::config::{
         ActorOptions, DEFAULT_MAILBOX_CAPACITY, DEFAULT_MAX_CHILDREN, DEFAULT_MAX_IN_FLIGHT,
-        DynamicChildren, DynamicInterleaving, DynamicMailbox, FixedChildren, FixedInterleaving,
-        FixedMailbox, NoChildren, NoInterleaving, NoMailbox, UnboundedChildren,
-        UnboundedInterleaving, UnboundedMailbox,
+        DynamicMailboxCapacity, DynamicMaxChildren, DynamicMaxInFlight, FixedMailboxCapacity,
+        FixedMaxChildren, FixedMaxInFlight, NoChildren, NoMailbox, NoMaxInFlight,
+        UnboundedMailboxCapacity, UnboundedMaxChildren, UnboundedMaxInFlight,
     };
     pub use crate::transport::{
         BoundedInbox, BoundedSender, NoInbox, NoSender, UnboundedInbox, UnboundedSender,
@@ -285,9 +287,10 @@ pub mod __private {
 /// remain explicit imports so operational behavior stays visible at call sites.
 pub mod prelude {
     pub use crate::{
-        Actor, ActorScope, ActorSpawner, Cx, DynamicChildrenOptions, DynamicInterleavingOptions,
-        DynamicMailboxOptions, Handler, HasChildren, HasMailbox, HasReply, Items, Message,
-        StopScope, StreamHandler, StreamMessage, StreamOut, StreamReply, Writer, actor, reply,
+        Actor, ActorScope, ActorSpawner, Cx, DynamicMailboxCapacityOptions,
+        DynamicMaxChildrenOptions, DynamicMaxInFlightOptions, Handler, HasChildren, HasMailbox,
+        HasReply, Items, Message, StopScope, StreamHandler, StreamMessage, StreamOut, StreamReply,
+        Writer, actor, reply,
     };
 }
 

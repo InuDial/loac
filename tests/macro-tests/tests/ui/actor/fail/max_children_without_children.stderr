@@ -1,0 +1,5 @@
+error: `max_children` requires `children`
+ --> tests/ui/actor/fail/max_children_without_children.rs:3:20
+  |
+3 | #[actor_api::actor(max_children = 8)]
+  |                    ^^^^^^^^^^^^

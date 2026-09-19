@@ -27,7 +27,7 @@ struct AdmissionActor {
     handled: Arc<AtomicUsize>,
 }
 
-#[actor(mailbox = 2)]
+#[actor(mailbox, mailbox_capacity = 2)]
 impl Actor for AdmissionActor {
     type SpawnArgs = AdmissionArgs;
 

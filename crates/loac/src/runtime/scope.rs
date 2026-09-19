@@ -100,7 +100,7 @@ impl<A: Actor> ActorScope<'_, A> {
     /// Returns this actor's non-owning address.
     ///
     /// A handler's self-call needs another dispatch slot.
-    /// Serial actors therefore cannot await self-calls.
+    /// A saturated scheduler cannot dispatch that self-call.
     /// A scheduler lease blocks its queued self-call.
     ///
     /// A serial lifecycle hook also blocks dispatch. While admission is still

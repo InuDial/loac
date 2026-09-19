@@ -14,7 +14,7 @@ use tokio::sync::mpsc;
 
 struct StreamActor;
 
-#[actor(mailbox, interleaved = unbounded)]
+#[actor(mailbox)]
 impl Actor for StreamActor {
     type SpawnArgs = ();
 

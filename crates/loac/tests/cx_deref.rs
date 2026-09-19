@@ -5,7 +5,7 @@ use tokio::sync::oneshot;
 
 struct Worker;
 
-#[actor(mailbox, interleaved = unbounded)]
+#[actor(mailbox)]
 impl Actor for Worker {
     type SpawnArgs = ();
 

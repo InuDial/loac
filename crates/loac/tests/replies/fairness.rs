@@ -4,7 +4,7 @@ struct FairActor {
     handled: Arc<AtomicUsize>,
 }
 
-#[actor(mailbox = 64, interleaved)]
+#[actor(mailbox, mailbox_capacity = 64)]
 impl Actor for FairActor {
     type SpawnArgs = Arc<AtomicUsize>;
 
@@ -118,7 +118,7 @@ struct FairChildExitActor {
     hook_completed: Option<oneshot::Sender<()>>,
 }
 
-#[actor(mailbox = 64, interleaved, children = unbounded)]
+#[actor(mailbox, mailbox_capacity = 64, children, max_children = unbounded)]
 impl Actor for FairChildExitActor {
     type SpawnArgs = FairChildExitArgs;
 

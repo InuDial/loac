@@ -2,7 +2,7 @@
 //!
 //! Every handler returns one `Cx` future.
 //! The actor task owns and polls that future.
-//! The `interleaved` actor option only changes concurrency.
+//! The `max_in_flight` option only changes concurrency.
 
 use std::{
     future::Future,

@@ -21,7 +21,7 @@ const MAILBOX_CAPACITIES: [usize; 3] = [1, 32, 256];
 
 struct MailboxActor;
 
-#[loac::actor(mailbox = dynamic)]
+#[loac::actor(mailbox, mailbox_capacity = dynamic)]
 impl Actor for MailboxActor {
     type SpawnArgs = ();
 

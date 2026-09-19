@@ -4,7 +4,7 @@ use tokio_util::sync::CancellationToken;
 
 struct CancellationActor;
 
-#[actor(mailbox = 1, interleaved = 1)]
+#[actor(mailbox, mailbox_capacity = 1, max_in_flight = 1)]
 impl Actor for CancellationActor {
     type SpawnArgs = ();
 
@@ -43,9 +43,10 @@ impl Handler<CancelWork> for CancellationActor {
     }
 }
 
-// A regular mailbox cancellation message cannot reach an active interleaved
-// reply while its only `max_in_flight` slot is occupied. A caller-owned token
-// wakes that reply directly; only then can the queued message dispatch.
+// The active handler occupies the only scheduler slot.
+// Therefore, mailbox cancellation cannot reach that handler.
+// A caller-owned token wakes it directly.
+// The queued cancellation message can then dispatch.
 #[tokio::test]
 async fn caller_cancellation_bypasses_full_handler_capacity() {
     let owner = loac::spawn::<CancellationActor>(());

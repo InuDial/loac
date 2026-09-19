@@ -5,7 +5,7 @@ use loac::prelude::*;
 
 struct Accumulator(u64);
 
-#[actor(mailbox, interleaved = unbounded)]
+#[actor(mailbox)]
 impl Actor for Accumulator {
     type SpawnArgs = u64;
 

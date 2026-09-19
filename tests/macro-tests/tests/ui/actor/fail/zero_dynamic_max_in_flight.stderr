@@ -1,0 +1,5 @@
+error: handler limit must be greater than zero
+ --> tests/ui/actor/fail/zero_dynamic_max_in_flight.rs:3:53
+  |
+3 | #[actor_api::actor(mailbox, max_in_flight = dynamic(0))]
+  |                                                     ^

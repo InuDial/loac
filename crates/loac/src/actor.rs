@@ -161,7 +161,7 @@ pub trait Actor:
     ///     }
     /// }
     ///
-    /// #[actor(children = unbounded)]
+    /// #[actor(children, max_children = unbounded)]
     /// impl Actor for Parent {
     ///     type SpawnArgs = Self;
     ///
@@ -304,7 +304,7 @@ pub trait HasReply: Message {}
 ///     notifications: usize,
 /// }
 ///
-/// #[actor(mailbox, interleaved = unbounded)]
+/// #[actor(mailbox)]
 /// impl Actor for Worker {
 ///     type SpawnArgs = Self;
 ///

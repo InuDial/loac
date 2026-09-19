@@ -1,0 +1,5 @@
+error: duplicate `max_children` option
+ --> tests/ui/actor/fail/duplicate_max_children.rs:4:56
+  |
+4 | #[actor_api::actor(children, max_children = unbounded, max_children = 8)]
+  |                                                        ^^^^^^^^^^^^

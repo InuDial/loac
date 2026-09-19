@@ -3,7 +3,7 @@ use loac::{Actor, ActorScope, Cx, StreamHandler, StreamOut, Writer};
 
 struct Streamer;
 
-#[loac::actor(mailbox, interleaved = unbounded)]
+#[loac::actor(mailbox)]
 impl Actor for Streamer {
     type SpawnArgs = ();
 

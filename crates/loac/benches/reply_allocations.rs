@@ -13,7 +13,7 @@ const MEASURED_CALLS: usize = 10_000;
 
 struct ReplyActor;
 
-#[loac::actor(mailbox = 1, interleaved = 1)]
+#[loac::actor(mailbox, mailbox_capacity = 1, max_in_flight = 1)]
 impl Actor for ReplyActor {
     type SpawnArgs = ();
 

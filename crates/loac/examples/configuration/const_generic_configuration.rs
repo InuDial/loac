@@ -1,12 +1,12 @@
 //! Reuses one const generic across actor options.
-//! `mailbox = dynamic(N)` makes `N` the spawn default.
-//! `interleaved = N` fixes the limit for each actor type.
+//! `mailbox, mailbox_capacity = dynamic(N)` makes `N` the spawn default.
+//! `max_in_flight = N` fixes the limit for each actor type.
 
 use loac::prelude::*;
 
 struct Service<const N: usize>;
 
-#[actor(mailbox = dynamic(N), interleaved = N)]
+#[actor(mailbox, mailbox_capacity = dynamic(N), max_in_flight = N)]
 impl<const N: usize> Actor for Service<N> {
     type SpawnArgs = ();
 

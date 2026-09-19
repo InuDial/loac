@@ -24,7 +24,7 @@ const MAILBOX_BACKLOG: usize = 32;
 
 struct ReplyActor;
 
-#[loac::actor(mailbox = dynamic, interleaved = dynamic)]
+#[loac::actor(mailbox, mailbox_capacity = dynamic, max_in_flight = dynamic)]
 impl Actor for ReplyActor {
     type SpawnArgs = ();
 

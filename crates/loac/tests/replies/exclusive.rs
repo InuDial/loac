@@ -9,7 +9,7 @@ struct ExclusiveActor {
     child_hooks: mpsc::UnboundedSender<()>,
 }
 
-#[actor(mailbox, children = unbounded, interleaved)]
+#[actor(mailbox, children, max_children = unbounded)]
 impl Actor for ExclusiveActor {
     type SpawnArgs = ExclusiveActorArgs;
 
@@ -140,7 +140,7 @@ async fn exclusive_pauses_all_scheduled_actor_work() {
 
 struct ScopedLeaseActor;
 
-#[actor(mailbox = 4, interleaved = 2)]
+#[actor(mailbox, mailbox_capacity = 4, max_in_flight = 2)]
 impl Actor for ScopedLeaseActor {
     type SpawnArgs = ();
 

@@ -1,0 +1,5 @@
+error: mailbox dispatch budget must be greater than zero
+ --> tests/ui/actor/fail/zero_mailbox_dispatch_budget.rs:4:55
+  |
+4 | #[actor_api::actor(mailbox, mailbox_dispatch_budget = 0)]
+  |                                                       ^

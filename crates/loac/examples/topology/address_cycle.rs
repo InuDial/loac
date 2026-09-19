@@ -8,7 +8,7 @@ struct Parent {
     child: ActorRef<Child>,
 }
 
-#[actor(mailbox, children = unbounded)]
+#[actor(mailbox, children, max_children = unbounded)]
 impl Actor for Parent {
     type SpawnArgs = ();
 

@@ -1,0 +1,5 @@
+error: duplicate `mailbox_dispatch_budget` option
+ --> tests/ui/actor/fail/duplicate_mailbox_dispatch_budget.rs:4:58
+  |
+4 | #[actor_api::actor(mailbox, mailbox_dispatch_budget = 4, mailbox_dispatch_budget = 8)]
+  |                                                          ^^^^^^^^^^^^^^^^^^^^^^^

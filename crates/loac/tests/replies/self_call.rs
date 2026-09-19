@@ -2,7 +2,7 @@ use super::*;
 
 struct SelfCaller;
 
-#[actor(mailbox = 8, interleaved = dynamic)]
+#[actor(mailbox, mailbox_capacity = 8, max_in_flight = dynamic)]
 impl Actor for SelfCaller {
     type SpawnArgs = ();
 

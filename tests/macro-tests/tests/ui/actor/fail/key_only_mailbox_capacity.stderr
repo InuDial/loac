@@ -1,0 +1,5 @@
+error: `mailbox_capacity` requires `= <limit>`
+ --> tests/ui/actor/fail/key_only_mailbox_capacity.rs:3:29
+  |
+3 | #[actor_api::actor(mailbox, mailbox_capacity)]
+  |                             ^^^^^^^^^^^^^^^^

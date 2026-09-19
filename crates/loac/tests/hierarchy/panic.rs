@@ -58,7 +58,7 @@ struct BranchArgs {
     dropped: oneshot::Sender<()>,
 }
 
-#[actor(children = unbounded)]
+#[actor(children, max_children = unbounded)]
 impl Actor for Branch {
     type SpawnArgs = BranchArgs;
 
@@ -95,7 +95,7 @@ struct PanicParentArgs {
     leaf_dropped: oneshot::Sender<()>,
 }
 
-#[actor(mailbox, children = unbounded)]
+#[actor(mailbox, children, max_children = unbounded)]
 impl Actor for PanicParent {
     type SpawnArgs = PanicParentArgs;
 

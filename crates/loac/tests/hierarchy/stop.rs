@@ -34,7 +34,7 @@ struct LogParentArgs {
     child_started: oneshot::Sender<ActorRef<LogChild>>,
 }
 
-#[actor(mailbox, children = unbounded)]
+#[actor(mailbox, children, max_children = unbounded)]
 impl Actor for LogParent {
     type SpawnArgs = LogParentArgs;
 
