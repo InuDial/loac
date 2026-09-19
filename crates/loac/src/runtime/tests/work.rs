@@ -3,6 +3,8 @@ use super::*;
 // A catch owns its panic payload after the first unwind ends.
 // Payload destruction must not start a second runtime unwind.
 #[tokio::test]
+// The nested payload leak is deliberate; Miri rejects leaking tests.
+#[cfg_attr(miri, ignore)]
 async fn actor_work_contains_panic_payload_destruction() {
     let control = Control::new();
     let payload_dropped = Arc::new(AtomicBool::new(false));

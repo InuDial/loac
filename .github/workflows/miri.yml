@@ -17,11 +17,10 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          # The runtime deliberately leaks cascading panic payloads.
           - name: stacked-borrows
-            flags: -Zmiri-disable-isolation -Zmiri-ignore-leaks
+            flags: -Zmiri-disable-isolation
           - name: tree-borrows
-            flags: -Zmiri-disable-isolation -Zmiri-ignore-leaks -Zmiri-tree-borrows
+            flags: -Zmiri-disable-isolation -Zmiri-tree-borrows
     steps:
       - name: Check out the repository
         uses: actions/checkout@v4
