@@ -1,10 +1,13 @@
 # loac
 
-`loac` is a small runtime for typed, local actors. It combines Actix-style message/reply typing with bounded admission, explicit ownership, and a Ractor-style supervision tree.
+`loac` is a typed local-actor runtime built around `Cx`.
+Handlers use `Cx::with` for temporary actor access.
+Those borrows cannot cross suspension points.
+This permits safe handler interleaving on one actor task.
+Finite policies bound mailboxes, handlers, and children.
+Structured supervision owns child lifecycles.
 
 The name joins `Loong` and `Actor` (`lo` + `ac`).
-
-The crate is an early MVP with a deliberately narrow contract.
 
 ## Quick Start
 
@@ -13,7 +16,7 @@ use loac::{ExitReason, Shutdown, SubtreeStatus, prelude::*};
 
 struct Counter(u64);
 
-#[actor(mailbox, interleaved = unbounded)]
+#[actor(mailbox)]
 impl Actor for Counter {
     type SpawnArgs = u64;
 
@@ -59,49 +62,55 @@ See the [examples index](examples/README.md) for runnable guides.
 | [`Recipient`](https://docs.rs/loac/latest/loac/trait.Recipient.html) | Erases the actor type for one message type. |
 | [`ActorOwner`](https://docs.rs/loac/latest/loac/struct.ActorOwner.html) | Uniquely owns one root actor. |
 | [`ActorScope`](https://docs.rs/loac/latest/loac/struct.ActorScope.html) | Exposes temporary capabilities during actor work. |
+| [`Cx`](https://docs.rs/loac/latest/loac/struct.Cx.html) | Lends actor access during handler polls. |
 
 ## Choose Capabilities
 
 `#[actor(...)]` generates the runtime configuration.
 Messaging and child ownership are opt-in.
-Omitting an option removes that capability.
-`mailbox`, `interleaved`, and `children` share the five forms below.
-An explicit finite limit must be a nonzero `usize` constant.
+Omitting a capability removes its methods.
+Capability flags accept no values.
 
-| Form | Selected profile |
+| Quantity policy | Selected profile |
 | --- | --- |
-| bare `option` | Fixed limit of 32 |
-| `option = N` | Fixed limit of N |
-| `option = dynamic` | Per-spawn limit defaulting to 32 |
-| `option = dynamic(N)` | Per-spawn limit defaulting to N |
-| `option = unbounded` | No finite limit |
+| `N` | Fixed limit of N |
+| `dynamic` | Per-spawn limit using the library default |
+| `dynamic(N)` | Per-spawn limit defaulting to N |
+| `unbounded` | No finite limit |
+
+Every finite limit is a nonzero `usize` constant.
 
 ### Mailbox
 
-Here `option` is `mailbox`.
+`mailbox` enables typed messaging.
+`mailbox_capacity` selects its admission limit.
+The default capacity is `32`.
 
 Mailbox capacity bounds messages awaiting dispatch.
-It does not bound active replies. [`call`](https://docs.rs/loac/latest/loac/struct.ActorRef.html#method.call) and [`send`](https://docs.rs/loac/latest/loac/struct.ActorRef.html#method.send) wait when full.
+It does not bound active handler futures. [`call`](https://docs.rs/loac/latest/loac/struct.ActorRef.html#method.call) and [`send`](https://docs.rs/loac/latest/loac/struct.ActorRef.html#method.send) wait when full.
 [`try_call`](https://docs.rs/loac/latest/loac/struct.ActorRef.html#method.try_call) and [`try_send`](https://docs.rs/loac/latest/loac/struct.ActorRef.html#method.try_send) return immediately.
-Dynamic options expose [`with_mailbox_capacity`](https://docs.rs/loac/latest/loac/trait.DynamicMailboxOptions.html#tymethod.with_mailbox_capacity).
+Dynamic options expose [`with_mailbox_capacity`](https://docs.rs/loac/latest/loac/trait.DynamicMailboxCapacityOptions.html#tymethod.with_mailbox_capacity).
 
 ### Handler Concurrency
 
-Here `option` is `interleaved`. It requires `mailbox`.
+`max_in_flight` requires `mailbox`.
 
 The limit counts active handler futures.
 A full limit pauses dispatch before another handler starts.
-Omitting `interleaved` permits one active handler.
-Dynamic options expose [`with_max_in_flight`](https://docs.rs/loac/latest/loac/trait.DynamicInterleavingOptions.html#tymethod.with_max_in_flight).
+The default limit is `32`.
+Use `max_in_flight = 1` for strict serialization.
+Dynamic options expose [`with_max_in_flight`](https://docs.rs/loac/latest/loac/trait.DynamicMaxInFlightOptions.html#tymethod.with_max_in_flight).
 
 ### Child-Spawning
 
-Here `option` is `children`.
+`children` enables direct child ownership.
+`max_children` selects its retained-child limit.
+The default limit is `32`.
 
 The limit counts retained child registrations.
 Finite profiles return the original spawn inputs on [`Full`](https://docs.rs/loac/latest/loac/supervision/struct.Full.html).
 Unbounded profiles use `Infallible` as their error.
-Dynamic options expose [`with_max_children`](https://docs.rs/loac/latest/loac/trait.DynamicChildrenOptions.html#tymethod.with_max_children).
+Dynamic options expose [`with_max_children`](https://docs.rs/loac/latest/loac/trait.DynamicMaxChildrenOptions.html#tymethod.with_max_children).
 
 See the [attribute reference](https://docs.rs/loac/latest/loac/attr.actor.html) for syntax and constraints.
 
@@ -125,14 +134,16 @@ message with unit output. Selecting either `reply` or `stream` implements
 still receives `Result<M::Reply, CallError>`. Reply and final types default
 to `()` when omitted.
 
-## Reply Scheduling
+## `Cx` Scheduling
 
 Every message handler returns one future.
-The actor task schedules all handler futures fairly.
-Mailbox profiles limit their active count.
+The actor task owns and polls every handler future.
+Scheduling rotates across dispatch, handlers, and child exits.
+`max_in_flight` bounds active handler futures.
 
 `Handler` and `StreamHandler` receive a `Cx` handle.
-Call `Cx::with` for temporary actor and scope access.
+`Cx::with` lends actor and scope through a synchronous closure.
+Actor access ends when that closure returns.
 Call `Cx::exclusive` for a scoped scheduler lease.
 All scheduled actor work pauses until that guard drops.
 Graceful `on_shutdown` hooks may still preempt the lease.

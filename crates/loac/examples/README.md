@@ -58,7 +58,7 @@ Each capability selects its limit profile independently.
 Dynamic profiles expose per-spawn overrides.
 Unbounded removes only the selected finite limit.
 Applications remain responsible for resource growth.
-`mailbox_budget` belongs to the actor type.
+`mailbox_dispatch_budget` belongs to the actor type.
 
 ## Exclusive scheduling
 
@@ -68,9 +68,9 @@ Applications remain responsible for resource growth.
 
 Use `Cx::exclusive` for scoped actor isolation.
 
-The bare `interleaved` option uses a fixed limit of 32.
+`max_in_flight` configures active handler capacity.
 Dynamic options allow `with_max_in_flight` per spawn.
-Omitting the option permits one active handler.
+Omitting the option permits `32` active handlers.
 Unbounded concurrency can retain arbitrarily many handler futures.
 
 ## Actor topology
@@ -84,7 +84,7 @@ Lifecycle ownership and message addresses form different graphs.
 | [`address_cycle`](topology/address_cycle.rs) | Build an address cycle during actor initialization. |
 
 The child-spawning examples (`child_actors`, `address_cycle`) select
-`children = unbounded`.
+`children, max_children = unbounded`.
 This enables `spawn_child` without a finite limit.
 Its error is `Infallible`.
 Those examples destructure `Ok` without panicking.
