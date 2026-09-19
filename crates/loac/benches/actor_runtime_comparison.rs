@@ -5,7 +5,7 @@ use std::{
 };
 
 use actix::Actor as _;
-use loac::{ActorOwner, DispatchHandler, ReplyExt, prelude::*};
+use loac::{ActorOwner, prelude::*};
 use oorandom::Rand64;
 use serde::Serialize;
 
@@ -23,9 +23,9 @@ const CONFIDENCE_LEVEL: f64 = 0.95;
 
 #[derive(Message)]
 #[message(reply = u64)]
-struct Ready;
+struct Request;
 
-impl actix::Message for Ready {
+impl actix::Message for Request {
     type Result = u64;
 }
 
@@ -58,34 +58,21 @@ impl Actor for LoongActor {
     }
 }
 
-impl DispatchHandler<Ready> for LoongActor {
-    fn handle(
-        &mut self,
-        _message: Ready,
-        _scope: &mut ActorScope<Self>,
-    ) -> impl loac::IntoReply<Self, Ready> {
-        1.ready()
+impl Handler<Request> for LoongActor {
+    async fn handle(_message: Request, _cx: Cx<'_, Self>) -> u64 {
+        1
     }
 }
 
-impl DispatchHandler<Notify> for LoongActor {
-    fn handle(
-        &mut self,
-        _message: Notify,
-        _scope: &mut ActorScope<Self>,
-    ) -> impl loac::IntoReply<Self, Notify> {
-        self.handled += 1;
-        ().ready()
+impl Handler<Notify> for LoongActor {
+    async fn handle(_message: Notify, mut cx: Cx<'_, Self>) {
+        cx.with(|actor, _| actor.handled += 1);
     }
 }
 
-impl DispatchHandler<Barrier> for LoongActor {
-    fn handle(
-        &mut self,
-        _message: Barrier,
-        _scope: &mut ActorScope<Self>,
-    ) -> impl loac::IntoReply<Self, Barrier> {
-        self.handled.ready()
+impl Handler<Barrier> for LoongActor {
+    async fn handle(_message: Barrier, mut cx: Cx<'_, Self>) -> u64 {
+        cx.with(|actor, _| actor.handled)
     }
 }
 
@@ -101,10 +88,10 @@ impl actix::Actor for ActixActor {
     }
 }
 
-impl actix::Handler<Ready> for ActixActor {
+impl actix::Handler<Request> for ActixActor {
     type Result = u64;
 
-    fn handle(&mut self, _message: Ready, _context: &mut Self::Context) -> Self::Result {
+    fn handle(&mut self, _message: Request, _context: &mut Self::Context) -> Self::Result {
         1
     }
 }
@@ -130,32 +117,32 @@ impl actix::Handler<Barrier> for ActixActor {
 // Different lifecycle guarantees remain part of measured costs.
 #[derive(Clone, Copy)]
 enum Workload {
-    ReadyRequestReply,
+    RequestReply,
     // A FIFO barrier drains every notification batch.
     // This does not measure saturation or backpressure.
     OneWayHandlerDrain,
 }
 
 impl Workload {
-    const ALL: [Self; 2] = [Self::ReadyRequestReply, Self::OneWayHandlerDrain];
+    const ALL: [Self; 2] = [Self::RequestReply, Self::OneWayHandlerDrain];
 
     const fn name(self) -> &'static str {
         match self {
-            Self::ReadyRequestReply => "ready_request_reply",
+            Self::RequestReply => "request_reply",
             Self::OneWayHandlerDrain => "one_way_handler_drain",
         }
     }
 
     const fn definition(self) -> &'static str {
         match self {
-            Self::ReadyRequestReply => "one bounded call and one ready reply",
+            Self::RequestReply => "one bounded call and one handler reply",
             Self::OneWayHandlerDrain => "32 try_send notifications followed by one barrier call",
         }
     }
 
     const fn boundary(self) -> &'static str {
         match self {
-            Self::ReadyRequestReply => "mailbox saturation is outside this workload",
+            Self::RequestReply => "mailbox saturation is outside this workload",
             Self::OneWayHandlerDrain => {
                 "barrier cost is amortized; saturation and backpressure are excluded"
             }
@@ -164,21 +151,21 @@ impl Workload {
 
     const fn element(self) -> &'static str {
         match self {
-            Self::ReadyRequestReply => "request",
+            Self::RequestReply => "request",
             Self::OneWayHandlerDrain => "notification",
         }
     }
 
     const fn elements_per_iteration(self) -> u64 {
         match self {
-            Self::ReadyRequestReply => 1,
+            Self::RequestReply => 1,
             Self::OneWayHandlerDrain => ONE_WAY_BATCH as u64,
         }
     }
 
     const fn seed_offset(self) -> u64 {
         match self {
-            Self::ReadyRequestReply => 0,
+            Self::RequestReply => 0,
             Self::OneWayHandlerDrain => 1,
         }
     }
@@ -215,13 +202,13 @@ impl RuntimePair {
 
         assert_eq!(
             loong_runtime
-                .block_on(loong_owner.call(Ready))
+                .block_on(loong_owner.call(Request))
                 .expect("the Loong actor starts"),
             1
         );
         assert_eq!(
             actix_system
-                .block_on(actix_actor.send(Ready))
+                .block_on(actix_actor.send(Request))
                 .expect("the Actix actor starts"),
             1
         );
@@ -250,11 +237,11 @@ impl RuntimePair {
     fn measure_loong(&mut self, workload: Workload, iterations: u64) -> Duration {
         let actor = &self.loong_owner;
         match workload {
-            Workload::ReadyRequestReply => self.loong_runtime.block_on(async {
+            Workload::RequestReply => self.loong_runtime.block_on(async {
                 let started = Instant::now();
                 for _ in 0..iterations {
                     let reply = actor
-                        .call(Ready)
+                        .call(Request)
                         .await
                         .expect("the Loong actor stays alive");
                     black_box(reply);
@@ -290,11 +277,11 @@ impl RuntimePair {
     fn measure_actix(&mut self, workload: Workload, iterations: u64) -> Duration {
         let actor = &self.actix_actor;
         match workload {
-            Workload::ReadyRequestReply => self.actix_system.block_on(async {
+            Workload::RequestReply => self.actix_system.block_on(async {
                 let started = Instant::now();
                 for _ in 0..iterations {
                     let reply = actor
-                        .send(Ready)
+                        .send(Request)
                         .await
                         .expect("the Actix actor stays alive");
                     black_box(reply);

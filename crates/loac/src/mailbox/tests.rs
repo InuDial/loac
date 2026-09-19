@@ -7,7 +7,6 @@ use std::{
 };
 
 mod admission;
-mod dispatch_reply;
 
 struct WakeCounter(AtomicUsize);
 

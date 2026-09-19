@@ -7,8 +7,8 @@ use std::{
 };
 
 use loac::{
-    Actor, ActorScope, CallError, Cx, DispatchHandler, ExitReason, Handler, InterleavedFutureExt,
-    Message, ReplyExt, StreamHandler, StreamOut, SubtreeStatus, Writer, actor,
+    Actor, ActorScope, CallError, Cx, ExitReason, Handler, Message, StreamHandler, StreamOut,
+    SubtreeStatus, Writer, actor,
 };
 use tokio::sync::oneshot;
 
@@ -41,15 +41,9 @@ impl Drop for QueuedDrop {
     }
 }
 
-impl DispatchHandler<QueuedDrop> for PendingInit {
-    fn handle(
-        &mut self,
-        _message: QueuedDrop,
-        _scope: &mut ActorScope<'_, Self>,
-    ) -> impl loac::IntoReply<Self, QueuedDrop> {
+impl Handler<QueuedDrop> for PendingInit {
+    async fn handle(_message: QueuedDrop, _cx: Cx<'_, Self>) {
         unreachable!("pending initialization prevents dispatch");
-        #[allow(unreachable_code)]
-        ().ready()
     }
 }
 
@@ -116,10 +110,10 @@ fn executor_teardown_discards_each_accepted_message() {
     drop(owner);
 }
 
-struct PendingInterleavedActor;
+struct PendingReplyActor;
 
 #[actor(mailbox = 2, interleaved = 2)]
-impl Actor for PendingInterleavedActor {
+impl Actor for PendingReplyActor {
     type SpawnArgs = ();
 
     async fn init(_: (), _scope: &mut ActorScope<'_, Self>) -> Self {
@@ -129,13 +123,13 @@ impl Actor for PendingInterleavedActor {
 
 #[derive(Message)]
 #[message(reply = ())]
-struct PendingInterleavedDrop {
+struct PendingReplyDrop {
     entered: Option<oneshot::Sender<()>>,
     drops: Arc<AtomicUsize>,
     dropped_while_unwinding: Arc<AtomicBool>,
 }
 
-impl std::future::Future for PendingInterleavedDrop {
+impl std::future::Future for PendingReplyDrop {
     type Output = ();
 
     fn poll(mut self: std::pin::Pin<&mut Self>, _task: &mut Context<'_>) -> Poll<()> {
@@ -146,29 +140,25 @@ impl std::future::Future for PendingInterleavedDrop {
     }
 }
 
-impl Drop for PendingInterleavedDrop {
+impl Drop for PendingReplyDrop {
     fn drop(&mut self) {
         self.drops.fetch_add(1, Ordering::SeqCst);
         self.dropped_while_unwinding
             .store(std::thread::panicking(), Ordering::SeqCst);
-        panic!("intentional interleaved future drop panic");
+        panic!("intentional reply future drop panic");
     }
 }
 
-impl DispatchHandler<PendingInterleavedDrop> for PendingInterleavedActor {
-    fn handle(
-        &mut self,
-        message: PendingInterleavedDrop,
-        _scope: &mut ActorScope<'_, Self>,
-    ) -> impl loac::IntoReply<Self, PendingInterleavedDrop> {
-        message.interleaved()
+impl Handler<PendingReplyDrop> for PendingReplyActor {
+    async fn handle(message: PendingReplyDrop, _cx: Cx<'_, Self>) {
+        message.await
     }
 }
 
 // Executor teardown drops scheduler entries without lifecycle access.
 // Each entry still needs its own unwind boundary.
 #[test]
-fn executor_teardown_contains_each_interleaved_drop_panic() {
+fn executor_teardown_contains_each_reply_drop_panic() {
     let runtime = tokio::runtime::Builder::new_current_thread()
         .build()
         .unwrap();
@@ -178,17 +168,17 @@ fn executor_teardown_contains_each_interleaved_drop_panic() {
     let (second_entered_tx, second_entered_rx) = oneshot::channel();
 
     let (owner, first, second) = runtime.block_on(async {
-        let owner = loac::spawn::<PendingInterleavedActor>(());
+        let owner = loac::spawn::<PendingReplyActor>(());
         let actor = owner.actor_ref();
         let first = actor
-            .try_call(PendingInterleavedDrop {
+            .try_call(PendingReplyDrop {
                 entered: Some(first_entered_tx),
                 drops: Arc::clone(&drops),
                 dropped_while_unwinding: Arc::clone(&dropped_while_unwinding),
             })
             .unwrap();
         let second = actor
-            .try_call(PendingInterleavedDrop {
+            .try_call(PendingReplyDrop {
                 entered: Some(second_entered_tx),
                 drops: Arc::clone(&drops),
                 dropped_while_unwinding: Arc::clone(&dropped_while_unwinding),

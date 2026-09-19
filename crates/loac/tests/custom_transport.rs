@@ -7,9 +7,8 @@ use std::{
 };
 
 use loac::{
-    Actor, ActorConfig, ActorScope, Cx, DispatchHandler, ExitReason, Handler, HasChildren,
-    HasInterleaving, Message, MessageConfig, ReplyExt, Shutdown, SupervisionConfig, scheduling,
-    spawn_with, supervision,
+    Actor, ActorConfig, ActorScope, Cx, ExitReason, Handler, HasChildren, Message, MessageConfig,
+    Shutdown, SupervisionConfig, scheduling, spawn_with, supervision,
     transport::{
         ErasedEnvelope, MessageInbox, MessageReservation, MessageSender, RuntimeInbox,
         TryReserveError,
@@ -264,20 +263,14 @@ impl Handler<Add> for ManualActor {
 #[message(reply = ())]
 struct Notify(u64);
 
-impl DispatchHandler<Notify> for ManualActor {
-    fn handle(
-        &mut self,
-        message: Notify,
-        _scope: &mut ActorScope<'_, Self>,
-    ) -> impl loac::IntoReply<Self, Notify> {
-        self.0 += message.0;
-        ().ready()
+impl Handler<Notify> for ManualActor {
+    async fn handle(message: Notify, mut cx: Cx<'_, Self>) {
+        cx.with(|actor, _| actor.0 += message.0);
     }
 }
 
 fn assert_send<T: Send>(_: &T) {}
 fn assert_has_children<A: HasChildren>() {}
-fn assert_has_interleaving<A: HasInterleaving>() {}
 
 // A manual transport may select every active scheduler profile.
 #[test]
@@ -309,7 +302,6 @@ fn manual_configs_select_each_public_supervisor() {
 // The non-Send options must be consumed before Tokio owns the actor task.
 #[tokio::test]
 async fn manual_transport_round_trips_with_local_spawn_options() {
-    assert_has_interleaving::<ManualActor>();
     let options = ManualOptions::default();
     let opened = Rc::clone(&options.opened);
     let owner = spawn_with::<ManualActor>(2, options);

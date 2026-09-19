@@ -11,9 +11,8 @@ use std::{
 use tokio::sync::oneshot;
 
 use crate::{
-    Actor, ActorConfig, ActorScope, CallError, DispatchHandler, ExitReason, Message, ReplyExt,
-    Shutdown, ShutdownStatus, owned::OwnedTasks, scheduling::ActorScheduler,
-    transport::MessageSender,
+    Actor, ActorConfig, ActorScope, CallError, Cx, ExitReason, Handler, Message, Shutdown,
+    ShutdownStatus, access::ScopedLease, scheduling::ActorScheduler, transport::MessageSender,
 };
 
 use super::super::{ActorInbox, ActorInner, CallEnvelope, Control, Envelope, Mode};
@@ -46,9 +45,8 @@ struct NoopEnvelope;
 impl<A: Actor> Envelope<A> for NoopEnvelope {
     fn dispatch(
         self: Box<Self>,
-        _actor: &mut A,
-        _scope: &mut ActorScope<A>,
-        _owned: &OwnedTasks<A>,
+        _cx: Cx<'_, A>,
+        _lease: ScopedLease<'_, A>,
         _scheduler: &mut ActorScheduler<A>,
         _inner: &Arc<ActorInner<A>>,
     ) {
@@ -69,9 +67,8 @@ impl Drop for PanicDropEnvelope {
 impl Envelope<UnboundedTestActor> for PanicDropEnvelope {
     fn dispatch(
         self: Box<Self>,
-        _actor: &mut UnboundedTestActor,
-        _scope: &mut ActorScope<UnboundedTestActor>,
-        _owned: &OwnedTasks<UnboundedTestActor>,
+        _cx: Cx<'_, UnboundedTestActor>,
+        _lease: ScopedLease<'_, UnboundedTestActor>,
         _scheduler: &mut ActorScheduler<UnboundedTestActor>,
         _inner: &Arc<ActorInner<UnboundedTestActor>>,
     ) {
@@ -99,14 +96,8 @@ impl Drop for RecoverMessage {
     }
 }
 
-impl DispatchHandler<RecoverMessage> for TestActor {
-    fn handle(
-        &mut self,
-        _message: RecoverMessage,
-        _scope: &mut ActorScope<Self>,
-    ) -> impl crate::IntoReply<Self, RecoverMessage> {
-        ().ready()
-    }
+impl Handler<RecoverMessage> for TestActor {
+    async fn handle(_message: RecoverMessage, _cx: Cx<'_, Self>) {}
 }
 
 // A capacity reservation is not admission. Once Drain wins the lifecycle
@@ -287,14 +278,8 @@ impl Drop for PanicDropMessage {
     }
 }
 
-impl DispatchHandler<PanicDropMessage> for TestActor {
-    fn handle(
-        &mut self,
-        _message: PanicDropMessage,
-        _scope: &mut ActorScope<Self>,
-    ) -> impl crate::IntoReply<Self, PanicDropMessage> {
-        ().ready()
-    }
+impl Handler<PanicDropMessage> for TestActor {
+    async fn handle(_message: PanicDropMessage, _cx: Cx<'_, Self>) {}
 }
 
 // Queued rejection first notifies the caller, then drops its message.

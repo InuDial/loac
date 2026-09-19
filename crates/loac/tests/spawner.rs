@@ -1,4 +1,4 @@
-use loac::{Actor, ActorScope, CallError, DispatchHandler, Message, ReplyExt, actor};
+use loac::{Actor, ActorScope, CallError, Cx, Handler, Message, actor};
 
 struct Ponger;
 
@@ -15,13 +15,9 @@ impl Actor for Ponger {
 #[message(reply = &'static str)]
 struct Ping;
 
-impl DispatchHandler<Ping> for Ponger {
-    fn handle(
-        &mut self,
-        _message: Ping,
-        _scope: &mut ActorScope<'_, Self>,
-    ) -> impl loac::IntoReply<Self, Ping> {
-        "pong".ready()
+impl Handler<Ping> for Ponger {
+    async fn handle(_message: Ping, _cx: Cx<'_, Self>) -> &'static str {
+        "pong"
     }
 }
 
@@ -42,14 +38,10 @@ impl Actor for Pinger {
 #[message(reply = String)]
 struct AskPong;
 
-impl DispatchHandler<AskPong> for Pinger {
-    fn handle(
-        &mut self,
-        _message: AskPong,
-        _scope: &mut ActorScope<'_, Self>,
-    ) -> impl loac::IntoReply<Self, AskPong> {
-        let ponger = self.ponger.clone();
-        async move { ponger.call(Ping).await.unwrap().to_owned() }
+impl Handler<AskPong> for Pinger {
+    async fn handle(_message: AskPong, mut cx: Cx<'_, Self>) -> String {
+        let ponger = cx.with(|actor, _| actor.ponger.clone());
+        ponger.call(Ping).await.unwrap().to_owned()
     }
 }
 

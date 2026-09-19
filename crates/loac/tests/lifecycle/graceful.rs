@@ -4,8 +4,8 @@ use std::sync::{
 };
 
 use loac::{
-    Actor, ActorScope, CallError, Cx, DispatchHandler, ExitReason, Handler, InterleavedFutureExt,
-    Message, Shutdown, ShutdownStatus, TryCallErrorKind, actor,
+    Actor, ActorScope, CallError, Cx, ExitReason, Handler, Message, Shutdown, ShutdownStatus,
+    TryCallErrorKind, actor,
 };
 use tokio::sync::oneshot;
 
@@ -219,10 +219,10 @@ async fn drain_runs_the_fixed_accepted_queue_in_order() {
     assert_eq!(*lock(&cleanup), vec![ExitReason::Drained]);
 }
 
-struct InterleavedDrainActor;
+struct ConcurrentDrainActor;
 
 #[actor(mailbox = 3, interleaved = 2)]
-impl Actor for InterleavedDrainActor {
+impl Actor for ConcurrentDrainActor {
     type SpawnArgs = ();
 
     async fn init(_args: (), _scope: &mut ActorScope<'_, Self>) -> Self {
@@ -232,37 +232,30 @@ impl Actor for InterleavedDrainActor {
 
 #[derive(Message)]
 #[message(reply = u8)]
-struct InterleavedDrainStep {
+struct ConcurrentDrainStep {
     id: u8,
     entered: oneshot::Sender<()>,
     release: oneshot::Receiver<()>,
 }
 
-impl DispatchHandler<InterleavedDrainStep> for InterleavedDrainActor {
-    fn handle(
-        &mut self,
-        message: InterleavedDrainStep,
-        _scope: &mut ActorScope<'_, Self>,
-    ) -> impl loac::IntoReply<Self, InterleavedDrainStep> {
-        async move {
-            let _ = message.entered.send(());
-            let _ = message.release.await;
-            message.id
-        }
-        .interleaved()
+impl Handler<ConcurrentDrainStep> for ConcurrentDrainActor {
+    async fn handle(message: ConcurrentDrainStep, _cx: Cx<'_, Self>) -> u8 {
+        let _ = message.entered.send(());
+        let _ = message.release.await;
+        message.id
     }
 }
 
-// Drain respects max_in_flight for the fixed interleaved queue.
+// Drain respects max_in_flight for scheduled replies.
 #[tokio::test]
-async fn drain_respects_max_in_flight_for_the_fixed_interleaved_queue() {
-    let mut owner = loac::spawn::<InterleavedDrainActor>(());
+async fn drain_respects_the_fixed_max_in_flight_limit() {
+    let mut owner = loac::spawn::<ConcurrentDrainActor>(());
     let actor = owner.actor_ref();
 
     let (first_entered_tx, first_entered_rx) = oneshot::channel();
     let (first_release_tx, first_release_rx) = oneshot::channel();
     let first = actor
-        .try_call(InterleavedDrainStep {
+        .try_call(ConcurrentDrainStep {
             id: 1,
             entered: first_entered_tx,
             release: first_release_rx,
@@ -271,7 +264,7 @@ async fn drain_respects_max_in_flight_for_the_fixed_interleaved_queue() {
     let (second_entered_tx, second_entered_rx) = oneshot::channel();
     let (second_release_tx, second_release_rx) = oneshot::channel();
     let second = actor
-        .try_call(InterleavedDrainStep {
+        .try_call(ConcurrentDrainStep {
             id: 2,
             entered: second_entered_tx,
             release: second_release_rx,
@@ -283,7 +276,7 @@ async fn drain_respects_max_in_flight_for_the_fixed_interleaved_queue() {
     let (third_entered_tx, mut third_entered_rx) = oneshot::channel();
     let (third_release_tx, third_release_rx) = oneshot::channel();
     let third = actor
-        .try_call(InterleavedDrainStep {
+        .try_call(ConcurrentDrainStep {
             id: 3,
             entered: third_entered_tx,
             release: third_release_rx,
@@ -298,7 +291,7 @@ async fn drain_respects_max_in_flight_for_the_fixed_interleaved_queue() {
     let (_fourth_release_tx, fourth_release_rx) = oneshot::channel();
     assert_eq!(
         actor
-            .try_call(InterleavedDrainStep {
+            .try_call(ConcurrentDrainStep {
                 id: 4,
                 entered: fourth_entered_tx,
                 release: fourth_release_rx,

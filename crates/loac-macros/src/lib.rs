@@ -10,7 +10,6 @@ use quote::quote;
 
 mod actor;
 mod message;
-mod sync_handler;
 
 /// Configures one `impl Actor for Type` block.
 ///
@@ -47,7 +46,7 @@ mod sync_handler;
 /// | --- | --- | --- |
 /// | `mailbox` | Enables typed public messaging | Nothing |
 /// | `mailbox_budget = E` | Limits consecutive message dispatch | `mailbox` |
-/// | `interleaved` | Enables `Handler`/`StreamHandler` dispatch and interleaved actor-aware replies | `mailbox` |
+/// | `interleaved` | Sets concurrent handler capacity | `mailbox` |
 /// | `children` | Enables direct child actor ownership | Nothing |
 ///
 /// `mailbox`, `interleaved`, and `children` share five forms:
@@ -85,15 +84,11 @@ mod sync_handler;
 /// This check does not force a Tokio task yield.
 /// The option requires `mailbox`.
 ///
-/// # Interleaved replies
+/// # Handler concurrency
 ///
-/// `Handler` and `StreamHandler` dispatch requires this capability.
-/// The limit counts active interleaved replies.
+/// The limit counts active handler futures.
 /// At the limit, queued messages pause before handler dispatch.
-/// Their reply modes are not known yet.
-/// All queued messages therefore wait behind the same limit.
-/// Omitting `interleaved` removes that capability and its queue.
-/// Owned replies remain available.
+/// Omitting `interleaved` permits one active handler.
 /// The option requires `mailbox`.
 ///
 /// # Child actors
@@ -132,21 +127,13 @@ pub fn actor(args: TokenStream, input: TokenStream) -> TokenStream {
 /// callable through `loac::HasReply`. The reply type defaults to `()` when
 /// `reply` is omitted.
 ///
-/// Prefer `#[message(reply = Type)]` and `loac::Handler` for ordinary
-/// asynchronous request handling; the handler returns a future and `loac`
-/// schedules it on the interleaved lane.
-///
-/// For a reply that is already complete during dispatch, implement
-/// `loac::SyncHandler` with `#[message(reply = Type)]` and attach
-/// `#[loac::sync_handler]` to the impl.
+/// Use `#[message(reply = Type)]` with `loac::Handler`.
+/// The actor task owns and polls the returned future.
 ///
 /// Use `#[message(stream = Item, reply = Final)]` for a streamed reply:
 /// `loac::call` then returns `loac::StreamReply<Item, Final>`, and the message
 /// is handled by implementing `loac::StreamHandler`. The final reply type
 /// defaults to `()` when only `stream` is present.
-///
-/// Explicit reply scheduling remains available by implementing
-/// `loac::DispatchHandler` directly.
 ///
 /// Generic parameters and existing `where` predicates are preserved. The derive
 /// adds `Send + 'static` bounds to the message type and every selected reply
@@ -154,45 +141,6 @@ pub fn actor(args: TokenStream, input: TokenStream) -> TokenStream {
 #[proc_macro_derive(Message, attributes(message))]
 pub fn derive_message(input: TokenStream) -> TokenStream {
     message::expand(input)
-}
-
-/// Enables dispatch for one `SyncHandler` impl.
-///
-/// Attach this attribute to an `impl SyncHandler<M> for Actor` block whose
-/// message uses `#[message(reply = Type)]`. It emits a ready-scheduled
-/// `DispatchHandler` impl for that concrete actor and message pair, so the
-/// actor does not need an interleaving lane.
-///
-/// ```
-/// # use actor_api as loac;
-/// use loac::{Actor, ActorScope, Message, SyncHandler, actor};
-///
-/// struct Counter(u64);
-///
-/// #[actor(mailbox)]
-/// impl Actor for Counter {
-///     type SpawnArgs = u64;
-///
-///     async fn init(value: u64, _scope: &mut ActorScope<'_, Self>) -> Self {
-///         Self(value)
-///     }
-/// }
-///
-/// #[derive(Message)]
-/// #[message(reply = u64)]
-/// struct Add(u64);
-///
-/// #[loac::sync_handler]
-/// impl SyncHandler<Add> for Counter {
-///     fn handle(&mut self, message: Add, _scope: &mut ActorScope<Self>) -> u64 {
-///         self.0 += message.0;
-///         self.0
-///     }
-/// }
-/// ```
-#[proc_macro_attribute]
-pub fn sync_handler(args: TokenStream, input: TokenStream) -> TokenStream {
-    sync_handler::expand(args, input)
 }
 
 fn actor_crate_path() -> syn::Result<TokenStream2> {

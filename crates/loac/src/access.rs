@@ -1,14 +1,15 @@
 #![allow(unsafe_code)]
 
-//! Scoped actor access for ordinary reply futures.
+//! Scoped actor access for handler futures.
 //!
-//! `Cx` is the unsafe capsule for ordinary [`Future`] replies.
+//! `Cx` is the unsafe capsule for [`Future`] handlers.
 //! It exposes actor state only within synchronous scopes.
 //! The runtime creates one handle per reply.
 //! The actor task polls that reply.
 //! No actor-aware operation overlaps another.
 
 use std::{
+    cell::Cell,
     marker::PhantomData,
     ops::Deref,
     sync::{
@@ -17,19 +18,25 @@ use std::{
     },
 };
 
-use crate::{Actor, ActorRef, ActorScope, runtime::CxTarget};
+use crate::{
+    Actor, ActorRef, ActorScope,
+    runtime::{ActorAccess, CxTarget},
+};
 
-/// Owned access handle for actor-aware reply futures.
+/// Owned access handle for actor-aware handler futures.
 ///
-/// [`Handler`](crate::Handler) creates ordinary replies with this handle.
-/// [`StreamHandler`](crate::StreamHandler) does likewise for streams.
-/// The runtime polls each reply on its actor task.
+/// [`Handler`](crate::Handler) receives this handle.
+/// [`StreamHandler`](crate::StreamHandler) does likewise.
+/// The runtime polls each handler on its actor task.
 /// Safe code cannot erase the handle's dispatch lifetime.
 /// `Cx` dereferences to [`ActorRef`] for address operations.
 pub struct Cx<'a, A: Actor + 'a> {
     target: CxTarget<A>,
     lease: Arc<ReplyLease>,
     _lifetime: PhantomData<&'a mut A>,
+    // Cx may move with its actor task.
+    // It cannot be shared across threads.
+    _not_sync: PhantomData<Cell<()>>,
 }
 
 /// Proves that one lease belongs to live actor storage.
@@ -89,7 +96,7 @@ impl ReplyLease {
     fn acquire(&self) {
         assert!(
             !self.held.swap(true, Ordering::AcqRel),
-            "a Cx reply cannot hold nested exclusive guards"
+            "a Cx handler cannot hold nested exclusive guards"
         );
     }
 
@@ -107,21 +114,19 @@ impl<A: Actor> ScopedLease<'_, A> {
 
 impl<'actor, A: Actor> Cx<'actor, A> {
     /// Creates paired access and liveness proof for one dispatch.
-    pub(crate) fn new(
-        _actor: &'actor mut A,
-        scope: &'actor mut ActorScope<'_, A>,
-    ) -> (Cx<'actor, A>, ScopedLease<'actor, A>) {
+    ///
+    /// This operation never borrows the stored actor.
+    pub(crate) fn new(owner: &'actor mut ActorAccess<A>) -> (Self, ScopedLease<'actor, A>) {
         let lease = ReplyLease::new();
         let scoped_lease = ScopedLease {
             lease: Arc::clone(&lease),
             _lifetime: PhantomData,
         };
         let cx = Cx {
-            target: scope
-                .target
-                .expect("Cx requires stable running actor storage"),
+            target: owner.target(),
             lease,
             _lifetime: PhantomData,
+            _not_sync: PhantomData,
         };
         (cx, scoped_lease)
     }
@@ -150,7 +155,7 @@ impl<'actor, A: Actor> Cx<'actor, A> {
 
     /// Pauses scheduled actor work until the returned guard drops.
     ///
-    /// Acquisition is immediate during the current reply poll.
+    /// Acquisition is immediate during the current handler poll.
     /// A retained guard pins this scheduler item.
     /// Graceful [`Actor::on_shutdown`] may preempt this lease.
     /// Use [`ExclusiveGuard::with`] for temporary state access.

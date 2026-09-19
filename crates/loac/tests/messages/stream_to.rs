@@ -1,6 +1,6 @@
 use loac::{
-    Actor, ActorScope, Cx, DispatchHandler, ExitReason, Message, ReplyExt, Shutdown, StreamHandler,
-    StreamOut, Writer, actor,
+    Actor, ActorScope, Cx, ExitReason, Handler, Message, Shutdown, StreamHandler, StreamOut,
+    Writer, actor,
 };
 use tokio::sync::mpsc;
 
@@ -56,14 +56,9 @@ impl Actor for ItemReceiver {
     }
 }
 
-impl DispatchHandler<Item> for ItemReceiver {
-    fn handle(
-        &mut self,
-        message: Item,
-        _scope: &mut ActorScope<'_, Self>,
-    ) -> impl loac::IntoReply<Self, Item> {
-        self.items.push(message.0);
-        ().ready()
+impl Handler<Item> for ItemReceiver {
+    async fn handle(message: Item, mut cx: Cx<'_, Self>) {
+        cx.with(|actor, _| actor.items.push(message.0));
     }
 }
 
@@ -71,13 +66,9 @@ impl DispatchHandler<Item> for ItemReceiver {
 #[message(reply = Vec<u8>)]
 struct Dump;
 
-impl DispatchHandler<Dump> for ItemReceiver {
-    fn handle(
-        &mut self,
-        _message: Dump,
-        _scope: &mut ActorScope<'_, Self>,
-    ) -> impl loac::IntoReply<Self, Dump> {
-        std::mem::take(&mut self.items).ready()
+impl Handler<Dump> for ItemReceiver {
+    async fn handle(_message: Dump, mut cx: Cx<'_, Self>) -> Vec<u8> {
+        cx.with(|actor, _| std::mem::take(&mut actor.items))
     }
 }
 

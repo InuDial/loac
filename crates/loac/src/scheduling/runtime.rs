@@ -1,6 +1,6 @@
 #![allow(
     private_interfaces,
-    reason = "public strategy proofs remain hidden by the private runtime module"
+    reason = "public profile proofs remain hidden by the private runtime module"
 )]
 
 use std::{
@@ -10,21 +10,17 @@ use std::{
 
 use crate::{
     Actor, ChildExit,
+    access::Cx,
     mailbox::{ActorInbox, ActorInner, Control, Mode},
-    owned::OwnedTasks,
     runtime::ActorAccess,
     transport::{MessageConfig, MessageInbox, MessageSender, NoInbox, NoSender},
 };
 
 use super::{
-    Disabled, InterleavedLane, InterleavedProfile, SchedulerProfile, Serial, SerialLane,
-    queue::InterleavedPoll,
+    Disabled, ReplyLane, ReplyProfile, ScheduledFuture, SchedulerProfile, queue::ReplyPoll,
 };
 
 pub(crate) type ActorScheduler<A> = <A as MessageConfig>::Scheduler;
-
-/// Grants access to sealed reply runtime bridges.
-pub struct Seal;
 
 /// Result of one scheduler-owned actor turn.
 pub(crate) enum SchedulerTurn {
@@ -43,12 +39,13 @@ pub(crate) struct TurnContext<'a, A: Actor> {
     pub(crate) access: &'a mut ActorAccess<A>,
     pub(crate) inbox: &'a mut ActorInbox<A>,
     pub(crate) inner: &'a Arc<ActorInner<A>>,
-    pub(crate) owned: &'a OwnedTasks<A>,
     pub(crate) receive_messages: bool,
     pub(crate) expected_mode: Mode,
 }
 
 pub(crate) trait RuntimeScheduler<A: Actor>: Send + 'static {
+    fn push(&mut self, future: ScheduledFuture);
+
     fn is_idle(&mut self) -> bool;
 
     fn poll_actor_replies(
@@ -67,7 +64,9 @@ pub(crate) trait RuntimeScheduler<A: Actor>: Send + 'static {
     fn clear(&mut self, control: &Control);
 }
 
-pub trait SchedulerStrategy<A: Actor, P: Send + 'static>: Send + 'static {
+pub trait ProfileRuntime<A: Actor, P: Send + 'static>: Send + 'static {
+    fn push(scheduler: &mut P, future: ScheduledFuture);
+
     fn is_idle(scheduler: &mut P) -> bool;
 
     fn poll_actor_replies(
@@ -86,18 +85,21 @@ pub trait SchedulerStrategy<A: Actor, P: Send + 'static>: Send + 'static {
     fn clear(scheduler: &mut P, control: &Control);
 }
 
-pub struct DisabledStrategy;
-pub struct SerialStrategy;
-pub struct InterleavedStrategy;
+pub struct DisabledRuntime;
+pub struct MailboxRuntime;
 
-// One associated strategy selects a monomorphized actor loop.
+// One associated runtime selects a monomorphized actor loop.
 impl<A, P> RuntimeScheduler<A> for P
 where
     A: Actor + MessageConfig<Scheduler = P>,
     P: SchedulerProfile<A>,
 {
+    fn push(&mut self, future: ScheduledFuture) {
+        P::Runtime::push(self, future);
+    }
+
     fn is_idle(&mut self) -> bool {
-        P::Strategy::is_idle(self)
+        P::Runtime::is_idle(self)
     }
 
     fn poll_actor_replies(
@@ -106,7 +108,7 @@ where
         expected_mode: Mode,
         task: &mut Context<'_>,
     ) -> Poll<()> {
-        P::Strategy::poll_actor_replies(self, control, expected_mode, task)
+        P::Runtime::poll_actor_replies(self, control, expected_mode, task)
     }
 
     fn poll_turn(
@@ -114,20 +116,24 @@ where
         turn: &mut TurnContext<'_, A>,
         task: &mut Context<'_>,
     ) -> Poll<SchedulerTurn> {
-        P::Strategy::poll_turn(self, turn, task)
+        P::Runtime::poll_turn(self, turn, task)
     }
 
     fn clear(&mut self, control: &Control) {
-        P::Strategy::clear(self, control);
+        P::Runtime::clear(self, control);
     }
 }
 
 // Disabled has no mailbox or reply lanes.
 // Child exits still need a supervision lane.
-impl<A> SchedulerStrategy<A, Disabled> for DisabledStrategy
+impl<A> ProfileRuntime<A, Disabled> for DisabledRuntime
 where
     A: Actor + MessageConfig<Sender = NoSender, Inbox = NoInbox, Scheduler = Disabled>,
 {
+    fn push(_scheduler: &mut Disabled, _future: ScheduledFuture) {
+        unreachable!("an actor without a mailbox cannot schedule replies")
+    }
+
     fn is_idle(_scheduler: &mut Disabled) -> bool {
         true
     }
@@ -159,101 +165,19 @@ where
     fn clear(_scheduler: &mut Disabled, _control: &Control) {}
 }
 
-// Serial and interleaved profiles keep separate lane loops.
-// Serial therefore acquires no interleaving protocol.
-impl<A> SchedulerStrategy<A, Serial<A>> for SerialStrategy
-where
-    A: Actor + MessageConfig<Scheduler = Serial<A>>,
-    A::Sender: MessageSender<A>,
-    A::Inbox: MessageInbox<A>,
-{
-    fn is_idle(scheduler: &mut Serial<A>) -> bool {
-        let _ = scheduler;
-        true
-    }
-
-    fn poll_actor_replies(
-        scheduler: &mut Serial<A>,
-        _control: &Control,
-        _expected_mode: Mode,
-        _task: &mut Context<'_>,
-    ) -> Poll<()> {
-        let _ = scheduler;
-        Poll::Pending
-    }
-
-    fn poll_turn(
-        scheduler: &mut Serial<A>,
-        turn: &mut TurnContext<'_, A>,
-        task: &mut Context<'_>,
-    ) -> Poll<SchedulerTurn> {
-        if turn.inner.control.mode() != turn.expected_mode {
-            return Poll::Ready(SchedulerTurn::LifecycleHint);
-        }
-
-        let start = scheduler.cursor;
-        let mut lane = start;
-        loop {
-            if turn.inner.control.mode() != turn.expected_mode {
-                return Poll::Ready(SchedulerTurn::LifecycleHint);
-            }
-            let selected = match lane {
-                SerialLane::Mailbox if turn.receive_messages => {
-                    let mut dispatched = 0;
-                    loop {
-                        match turn.inbox.poll_recv(task) {
-                            Poll::Ready(Some(envelope)) => {
-                                let (actor, mut scope) = turn.access.parts();
-                                envelope
-                                    .dispatch(actor, &mut scope, turn.owned, scheduler, turn.inner);
-                                dispatched += 1;
-                            }
-                            Poll::Ready(None) => break Some(SchedulerTurn::InboxClosed),
-                            Poll::Pending => break None,
-                        }
-
-                        if turn.inner.control.mode() != turn.expected_mode {
-                            scheduler.cursor = lane.next();
-                            return Poll::Ready(SchedulerTurn::LifecycleHint);
-                        }
-                        if dispatched == A::MAILBOX_DISPATCH_BUDGET.get() {
-                            break Some(SchedulerTurn::Progress);
-                        }
-                    }
-                }
-                SerialLane::ChildExit => poll_child(turn.access, task),
-                _ => None,
-            };
-
-            if let Some(turn) = selected {
-                scheduler.cursor = lane.next();
-                return Poll::Ready(turn);
-            }
-
-            lane = lane.next();
-            if lane == start {
-                break;
-            }
-        }
-
-        scheduler.cursor = start.next();
-        Poll::Pending
-    }
-
-    fn clear(scheduler: &mut Serial<A>, _control: &Control) {
-        let _ = scheduler;
-    }
-}
-
-impl<A, P> SchedulerStrategy<A, P> for InterleavedStrategy
+impl<A, P> ProfileRuntime<A, P> for MailboxRuntime
 where
     A: Actor + MessageConfig<Scheduler = P>,
     A::Sender: MessageSender<A>,
     A::Inbox: MessageInbox<A>,
-    P: InterleavedProfile<A>,
+    P: ReplyProfile<A>,
 {
+    fn push(scheduler: &mut P, future: ScheduledFuture) {
+        scheduler.state().push(future);
+    }
+
     fn is_idle(scheduler: &mut P) -> bool {
-        !scheduler.state().has_interleaved()
+        !scheduler.state().has_replies()
     }
 
     fn poll_actor_replies(
@@ -263,10 +187,8 @@ where
         task: &mut Context<'_>,
     ) -> Poll<()> {
         match scheduler.state().queue.poll(control, expected_mode, task) {
-            InterleavedPoll::Pending
-            | InterleavedPoll::Leased
-            | InterleavedPoll::BudgetExhausted => Poll::Pending,
-            InterleavedPoll::Progress => Poll::Ready(()),
+            ReplyPoll::Pending | ReplyPoll::Leased | ReplyPoll::BudgetExhausted => Poll::Pending,
+            ReplyPoll::Progress => Poll::Ready(()),
         }
     }
 
@@ -285,10 +207,10 @@ where
                 .queue
                 .poll(&turn.inner.control, turn.expected_mode, task)
             {
-                InterleavedPoll::Progress => Poll::Ready(SchedulerTurn::Progress),
-                InterleavedPoll::Pending
-                | InterleavedPoll::Leased
-                | InterleavedPoll::BudgetExhausted => Poll::Pending,
+                ReplyPoll::Progress => Poll::Ready(SchedulerTurn::Progress),
+                ReplyPoll::Pending | ReplyPoll::Leased | ReplyPoll::BudgetExhausted => {
+                    Poll::Pending
+                }
             };
         }
 
@@ -299,23 +221,22 @@ where
                 return Poll::Ready(SchedulerTurn::LifecycleHint);
             }
             let selected = match lane {
-                InterleavedLane::Mailbox
+                ReplyLane::Mailbox
                     if turn.receive_messages && scheduler.state().has_dispatch_capacity() =>
                 {
                     let mut dispatched = 0;
                     loop {
                         match turn.inbox.poll_recv(task) {
                             Poll::Ready(Some(envelope)) => {
-                                let (actor, mut scope) = turn.access.parts();
-                                envelope
-                                    .dispatch(actor, &mut scope, turn.owned, scheduler, turn.inner);
+                                let (cx, lease) = Cx::new(turn.access);
+                                envelope.dispatch(cx, lease, scheduler, turn.inner);
                                 dispatched += 1;
                             }
                             Poll::Ready(None) => break Some(SchedulerTurn::InboxClosed),
                             Poll::Pending
                                 if dispatched > 0
-                                    && start == InterleavedLane::Interleaved
-                                    && scheduler.state().has_interleaved() =>
+                                    && start == ReplyLane::Reply
+                                    && scheduler.state().has_replies() =>
                             {
                                 break Some(SchedulerTurn::Progress);
                             }
@@ -333,22 +254,22 @@ where
                         }
                     }
                 }
-                InterleavedLane::Interleaved if scheduler.state().has_interleaved() => {
+                ReplyLane::Reply if scheduler.state().has_replies() => {
                     match scheduler.state().queue.poll(
                         &turn.inner.control,
                         turn.expected_mode,
                         task,
                     ) {
-                        InterleavedPoll::Pending => None,
-                        InterleavedPoll::Progress => Some(SchedulerTurn::Progress),
-                        InterleavedPoll::Leased => return Poll::Pending,
-                        InterleavedPoll::BudgetExhausted => {
+                        ReplyPoll::Pending => None,
+                        ReplyPoll::Progress => Some(SchedulerTurn::Progress),
+                        ReplyPoll::Leased => return Poll::Pending,
+                        ReplyPoll::BudgetExhausted => {
                             scheduler.state().cursor = lane.next();
                             return Poll::Pending;
                         }
                     }
                 }
-                InterleavedLane::ChildExit => poll_child(turn.access, task),
+                ReplyLane::ChildExit => poll_child(turn.access, task),
                 _ => None,
             };
 

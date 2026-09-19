@@ -4,7 +4,7 @@ use std::{fmt, marker::PhantomData, num::NonZeroUsize};
 #[doc(hidden)]
 pub const DEFAULT_MAILBOX_CAPACITY: usize = 32;
 
-/// Default limit used by built-in interleaving configurations.
+/// Default limit used by built-in concurrency configurations.
 #[doc(hidden)]
 pub const DEFAULT_MAX_IN_FLIGHT: usize = 32;
 
@@ -15,7 +15,7 @@ pub const DEFAULT_MAX_CHILDREN: usize = 32;
 /// Built-in spawn options for one actor.
 ///
 /// `M` retains only mailbox values which may vary per spawn.
-/// `I` retains only interleaving values which may vary per spawn.
+/// `I` retains only concurrency values which may vary per spawn.
 /// `C` retains only child limits which may vary per spawn.
 /// The actor marker prevents options from crossing actor types.
 pub struct ActorOptions<A, M, I, C> {
@@ -26,14 +26,14 @@ pub struct ActorOptions<A, M, I, C> {
 }
 
 impl<A, M, C, const DEFAULT: usize> ActorOptions<A, M, DynamicInterleaving<DEFAULT>, C> {
-    /// Sets the maximum number of active interleaved replies.
+    /// Sets the maximum number of active handler futures.
     #[must_use]
     pub const fn with_max_in_flight(mut self, max_in_flight: NonZeroUsize) -> Self {
         self.interleaving.max_in_flight = Some(max_in_flight);
         self
     }
 
-    /// Resolves this spawn's dynamic interleaved-reply limit.
+    /// Resolves this spawn's dynamic handler limit.
     #[doc(hidden)]
     pub const fn max_in_flight(&self) -> NonZeroUsize {
         match self.interleaving.max_in_flight {
@@ -136,15 +136,15 @@ pub struct FixedMailbox;
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub struct UnboundedMailbox;
 
-/// Spawn state for an actor without interleaved replies.
+/// Spawn state without a handler-concurrency override.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub struct NoInterleaving;
 
-/// Spawn state for an actor with a fixed interleaved-reply limit.
+/// Spawn state with a fixed handler-concurrency limit.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub struct FixedInterleaving;
 
-/// Spawn state for an actor with unbounded interleaved replies.
+/// Spawn state with unbounded handler concurrency.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub struct UnboundedInterleaving;
 
@@ -177,7 +177,7 @@ impl<const DEFAULT: usize> Default for DynamicMailbox<DEFAULT> {
     }
 }
 
-/// Spawn state for an actor with a dynamic interleaved-reply limit.
+/// Spawn state with dynamic handler concurrency.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct DynamicInterleaving<const DEFAULT: usize = DEFAULT_MAX_IN_FLIGHT> {
     max_in_flight: Option<NonZeroUsize>,
@@ -185,7 +185,7 @@ pub struct DynamicInterleaving<const DEFAULT: usize = DEFAULT_MAX_IN_FLIGHT> {
 
 impl<const DEFAULT: usize> DynamicInterleaving<DEFAULT> {
     const DEFAULT_MAX_IN_FLIGHT: NonZeroUsize =
-        NonZeroUsize::new(DEFAULT).expect("interleaved reply limit must be greater than zero");
+        NonZeroUsize::new(DEFAULT).expect("handler concurrency must be greater than zero");
 }
 
 impl<const DEFAULT: usize> Default for DynamicInterleaving<DEFAULT> {
@@ -228,9 +228,9 @@ impl<A, I, C, const DEFAULT: usize> DynamicMailboxOptions
     }
 }
 
-/// Options whose interleaved-reply limit may change per spawn.
+/// Options whose handler-concurrency limit may change per spawn.
 pub trait DynamicInterleavingOptions: Sized {
-    /// Overrides the active interleaved-reply limit for one spawn.
+    /// Overrides the active handler limit for one spawn.
     #[must_use]
     fn with_max_in_flight(self, max_in_flight: NonZeroUsize) -> Self;
 }

@@ -1,4 +1,4 @@
-use loac::{Actor, ActorScope, DispatchHandler, ExitReason, Message, ReplyExt, Shutdown, actor};
+use loac::{Actor, ActorScope, Cx, ExitReason, Handler, Message, Shutdown, actor};
 use tokio::sync::mpsc;
 
 use super::support::watchdog;
@@ -18,14 +18,12 @@ impl Actor for Calculator {
 #[message(reply = u64)]
 struct Add(u64);
 
-impl DispatchHandler<Add> for Calculator {
-    fn handle(
-        &mut self,
-        message: Add,
-        _scope: &mut ActorScope<Self>,
-    ) -> impl loac::IntoReply<Self, Add> {
-        self.0 += message.0;
-        self.0.ready()
+impl Handler<Add> for Calculator {
+    async fn handle(message: Add, mut cx: Cx<'_, Self>) -> u64 {
+        cx.with(|actor, _| {
+            actor.0 += message.0;
+            actor.0
+        })
     }
 }
 
@@ -33,13 +31,9 @@ impl DispatchHandler<Add> for Calculator {
 #[message(reply = String)]
 struct Describe;
 
-impl DispatchHandler<Describe> for Calculator {
-    fn handle(
-        &mut self,
-        _message: Describe,
-        _scope: &mut ActorScope<Self>,
-    ) -> impl loac::IntoReply<Self, Describe> {
-        format!("count={}", self.0).ready()
+impl Handler<Describe> for Calculator {
+    async fn handle(_message: Describe, mut cx: Cx<'_, Self>) -> String {
+        cx.with(|actor, _| format!("count={}", actor.0))
     }
 }
 
@@ -61,16 +55,12 @@ async fn one_actor_handles_multiple_typed_message_replies() {
 #[message(reply = mpsc::Receiver<u8>)]
 struct Events;
 
-impl DispatchHandler<Events> for Calculator {
-    fn handle(
-        &mut self,
-        _message: Events,
-        _scope: &mut ActorScope<Self>,
-    ) -> impl loac::IntoReply<Self, Events> {
+impl Handler<Events> for Calculator {
+    async fn handle(_message: Events, _cx: Cx<'_, Self>) -> mpsc::Receiver<u8> {
         let (events, receiver) = mpsc::channel(2);
         events.try_send(1).expect("the stream buffer has room");
         events.try_send(2).expect("the stream buffer has room");
-        receiver.ready()
+        receiver
     }
 }
 

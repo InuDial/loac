@@ -55,7 +55,8 @@ use crate::{Actor, ActorConfig, mailbox::Envelope};
 /// `open` creates one matched state triple.
 /// Actor bounds reject incompatible state triples.
 /// Actors without a mailbox use [`scheduling::Disabled`](crate::scheduling::Disabled).
-/// Mailbox actors without interleaving use [`scheduling::Serial`](crate::scheduling::Serial).
+/// Mailbox actors without a concurrency override use
+/// [`scheduling::Serial`](crate::scheduling::Serial).
 pub trait MessageConfig: ActorConfig {
     /// Maximum mailbox dispatches during one actor lane visit.
     ///

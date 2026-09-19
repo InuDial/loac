@@ -15,23 +15,20 @@ use std::{
 use tokio::sync::oneshot;
 
 use crate::{
-    Actor, ActorConfig, ActorRef, ActorScope, ChildExit, ChildId, DispatchHandler, ExitReason,
-    ExitStatus, Message, MessageConfig, ReplyExt, Shutdown, ShutdownStatus, SubtreeStatus,
+    Actor, ActorConfig, ActorRef, ActorScope, ChildExit, Cx, ExitReason, ExitStatus, Handler,
+    Message, MessageConfig, Shutdown, ShutdownStatus, SubtreeStatus,
+    access::ScopedLease,
     actor::HasMailbox,
     mailbox::{ActorInbox, ActorInner, Control, Envelope, Mode},
-    owned::OwnedTasks,
-    scheduling::{
-        ActorScheduler, InterleavedLane, InterleavedProfile, InterleavedScheduler, ScheduledFuture,
-        SchedulerTurn, Seal,
-    },
+    scheduling::{ActorScheduler, ReplyLane, ReplyProfile, ScheduledFuture},
     supervision::runtime::{RuntimeChildren, tests::ChildrenFixture},
     transport::MessageSender,
 };
 
 use super::{
-    ActorAccess, ActorTask, ActorWorkGuard, ActorWorkState, DiscardOutcome, DrainTurn, ExitGuard,
-    ScopeState, TEARDOWN_DROP_BUDGET, Work, actor_turn, await_actor_work, close_and_discard,
-    drain_turn, graceful_finish, handle_child_exit, kill_actor, run_actor,
+    ActorAccess, ActorTask, ActorWorkGuard, ActorWorkState, DiscardOutcome, ExitGuard, ScopeState,
+    TEARDOWN_DROP_BUDGET, Work, actor_turn, await_actor_work, close_and_discard, graceful_finish,
+    handle_child_exit, kill_actor, run_actor,
 };
 
 mod actor_turn;
@@ -274,14 +271,8 @@ impl Actor for AbortChildParent {
 #[message(reply = ())]
 struct Ping;
 
-impl DispatchHandler<Ping> for AbortChildParent {
-    fn handle(
-        &mut self,
-        _message: Ping,
-        _scope: &mut ActorScope<Self>,
-    ) -> impl crate::IntoReply<Self, Ping> {
-        ().ready()
-    }
+impl Handler<Ping> for AbortChildParent {
+    async fn handle(_message: Ping, _cx: Cx<'_, Self>) {}
 }
 
 struct ControlledChildExit {
@@ -316,9 +307,8 @@ struct CountEnvelope(Arc<AtomicUsize>);
 impl<A: Actor> Envelope<A> for CountEnvelope {
     fn dispatch(
         self: Box<Self>,
-        _actor: &mut A,
-        _scope: &mut ActorScope<A>,
-        _owned: &OwnedTasks<A>,
+        _cx: Cx<'_, A>,
+        _lease: ScopedLease<'_, A>,
         _scheduler: &mut ActorScheduler<A>,
         _inner: &Arc<ActorInner<A>>,
     ) {
@@ -335,9 +325,8 @@ struct PanicEnvelope;
 impl Envelope<TestActor> for PanicEnvelope {
     fn dispatch(
         self: Box<Self>,
-        _actor: &mut TestActor,
-        _scope: &mut ActorScope<TestActor>,
-        _owned: &OwnedTasks<TestActor>,
+        _cx: Cx<'_, TestActor>,
+        _lease: ScopedLease<'_, TestActor>,
         _scheduler: &mut ActorScheduler<TestActor>,
         _inner: &Arc<ActorInner<TestActor>>,
     ) {
@@ -379,9 +368,8 @@ impl Drop for ChildKillDropProbe {
 impl Envelope<TestActor> for ChildKillDropProbe {
     fn dispatch(
         self: Box<Self>,
-        _actor: &mut TestActor,
-        _scope: &mut ActorScope<TestActor>,
-        _owned: &OwnedTasks<TestActor>,
+        _cx: Cx<'_, TestActor>,
+        _lease: ScopedLease<'_, TestActor>,
         _scheduler: &mut ActorScheduler<TestActor>,
         _inner: &Arc<ActorInner<TestActor>>,
     ) {
@@ -434,9 +422,8 @@ impl Drop for TeardownEnvelope {
 impl<A: Actor> Envelope<A> for TeardownEnvelope {
     fn dispatch(
         self: Box<Self>,
-        _actor: &mut A,
-        _scope: &mut ActorScope<A>,
-        _owned: &OwnedTasks<A>,
+        _cx: Cx<'_, A>,
+        _lease: ScopedLease<'_, A>,
         _scheduler: &mut ActorScheduler<A>,
         _inner: &Arc<ActorInner<A>>,
     ) {

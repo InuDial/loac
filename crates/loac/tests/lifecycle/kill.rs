@@ -1,9 +1,6 @@
 use std::{future, sync::mpsc as std_mpsc, time::Duration};
 
-use loac::{
-    ActorScope, CallError, Cx, DispatchHandler, ExitReason, Handler, Message, ReplyExt, Shutdown,
-    ShutdownStatus,
-};
+use loac::{CallError, Cx, ExitReason, Handler, Message, Shutdown, ShutdownStatus};
 use tokio::sync::oneshot;
 
 use super::{
@@ -45,7 +42,7 @@ impl Handler<ForgottenLease> for LifecycleActor {
 
 #[derive(Message)]
 #[message(reply = ())]
-struct OwnedInterruptible {
+struct ScheduledInterruptible {
     entered: oneshot::Sender<()>,
     drop_barrier: DropBarrier,
 }
@@ -64,17 +61,11 @@ impl Drop for DropBarrier {
     }
 }
 
-impl DispatchHandler<OwnedInterruptible> for LifecycleActor {
-    fn handle(
-        &mut self,
-        message: OwnedInterruptible,
-        _scope: &mut ActorScope<'_, Self>,
-    ) -> impl loac::IntoReply<Self, OwnedInterruptible> {
-        async move {
-            let _drop_barrier = message.drop_barrier;
-            let _ = message.entered.send(());
-            future::pending().await
-        }
+impl Handler<ScheduledInterruptible> for LifecycleActor {
+    async fn handle(message: ScheduledInterruptible, _cx: Cx<'_, Self>) {
+        let _drop_barrier = message.drop_barrier;
+        let _ = message.entered.send(());
+        future::pending().await
     }
 }
 
@@ -82,23 +73,20 @@ impl DispatchHandler<OwnedInterruptible> for LifecycleActor {
 #[message(reply = ())]
 struct KillBeforeReady;
 
-impl DispatchHandler<KillBeforeReady> for LifecycleActor {
-    fn handle(
-        &mut self,
-        _message: KillBeforeReady,
-        scope: &mut ActorScope<'_, Self>,
-    ) -> impl loac::IntoReply<Self, KillBeforeReady> {
-        assert_eq!(
-            scope.request_shutdown(Shutdown::Kill),
-            ShutdownStatus::Requested
-        );
-        ().ready()
+impl Handler<KillBeforeReady> for LifecycleActor {
+    async fn handle(_message: KillBeforeReady, mut cx: Cx<'_, Self>) {
+        cx.with(|_, scope| {
+            assert_eq!(
+                scope.request_shutdown(Shutdown::Kill),
+                ShutdownStatus::Requested
+            );
+        });
     }
 }
 
-// Kill before ready completion reports the dispatching phase.
+// Kill before completion reports the dispatching phase.
 #[tokio::test]
-async fn kill_before_ready_completion_reports_the_dispatching_phase() {
+async fn kill_before_completion_reports_the_dispatching_phase() {
     let mut owner = actor_with_capacity(1).owner;
     let actor = owner.actor_ref();
 
@@ -174,17 +162,17 @@ async fn kill_terminates_a_reply_with_a_forgotten_lease() {
     assert_eq!(watchdog(owner.wait()).await.reason(), ExitReason::Killed);
 }
 
-// The destructor blocks after confirming cancellation; Kill must join owned
-// reply cancellation before publishing exit.
+// The destructor blocks during scheduler cleanup.
+// Kill waits before publishing exit.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn kill_joins_owned_reply_cancellation_before_publishing_exit() {
+async fn kill_drops_scheduled_reply_before_publishing_exit() {
     let mut owner = actor_with_capacity(1).owner;
     let actor = owner.actor_ref();
     let (entered_tx, entered_rx) = oneshot::channel();
     let (drop_entered_tx, drop_entered_rx) = oneshot::channel();
     let (drop_release_tx, drop_release_rx) = std_mpsc::channel();
     let response = actor
-        .try_call(OwnedInterruptible {
+        .try_call(ScheduledInterruptible {
             entered: entered_tx,
             drop_barrier: DropBarrier {
                 entered: Some(drop_entered_tx),

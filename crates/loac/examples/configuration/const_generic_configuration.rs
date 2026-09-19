@@ -19,13 +19,9 @@ impl<const N: usize> Actor for Service<N> {
 #[message(reply = usize)]
 struct ReadTypeParameter;
 
-impl<const N: usize> DispatchHandler<ReadTypeParameter> for Service<N> {
-    fn handle(
-        &mut self,
-        _message: ReadTypeParameter,
-        _scope: &mut ActorScope<Self>,
-    ) -> impl loac::IntoReply<Self, ReadTypeParameter> {
-        N.ready()
+impl<const N: usize> Handler<ReadTypeParameter> for Service<N> {
+    async fn handle(_message: ReadTypeParameter, _cx: Cx<'_, Self>) -> usize {
+        N
     }
 }
 

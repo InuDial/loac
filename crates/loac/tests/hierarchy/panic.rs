@@ -1,8 +1,7 @@
 use std::{future::Future, sync::mpsc as sync_mpsc, task::Poll};
 
 use loac::{
-    Actor, ActorRef, ActorScope, CallError, DispatchHandler, ExitReason, Message, ReplyExt,
-    SubtreeStatus, actor,
+    Actor, ActorRef, ActorScope, CallError, Cx, ExitReason, Handler, Message, SubtreeStatus, actor,
 };
 use tokio::sync::oneshot;
 
@@ -118,15 +117,9 @@ impl Actor for PanicParent {
 #[message(reply = ())]
 struct PanicTree;
 
-impl DispatchHandler<PanicTree> for PanicParent {
-    fn handle(
-        &mut self,
-        _message: PanicTree,
-        _scope: &mut ActorScope<'_, Self>,
-    ) -> impl loac::IntoReply<Self, PanicTree> {
+impl Handler<PanicTree> for PanicParent {
+    async fn handle(_message: PanicTree, _cx: Cx<'_, Self>) {
         panic!("intentional parent panic");
-        #[allow(unreachable_code)]
-        ().ready()
     }
 }
 

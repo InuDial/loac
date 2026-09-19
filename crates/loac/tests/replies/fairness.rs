@@ -15,29 +15,26 @@ impl Actor for FairActor {
 
 #[derive(Message)]
 #[message(reply = bool)]
-struct OwnedTaskIdentity;
+struct ActorTaskIdentity;
 
-impl DispatchHandler<OwnedTaskIdentity> for FairActor {
-    fn handle(
-        &mut self,
-        _message: OwnedTaskIdentity,
-        _scope: &mut ActorScope<Self>,
-    ) -> impl loac::IntoReply<Self, OwnedTaskIdentity> {
+impl Handler<ActorTaskIdentity> for FairActor {
+    async fn handle(_message: ActorTaskIdentity, _cx: Cx<'_, Self>) -> bool {
         let actor_task = tokio::task::id();
-        async move { tokio::task::id() != actor_task }
+        tokio::task::yield_now().await;
+        tokio::task::id() == actor_task
     }
 }
 
 #[derive(Message)]
 #[message(reply = ())]
-struct ActiveInterleavedReply {
+struct ActiveReply {
     entered: oneshot::Sender<()>,
     release: oneshot::Receiver<()>,
     completed_at: Arc<AtomicUsize>,
 }
 
-impl Handler<ActiveInterleavedReply> for FairActor {
-    async fn handle(message: ActiveInterleavedReply, mut cx: Cx<'_, Self>) {
+impl Handler<ActiveReply> for FairActor {
+    async fn handle(message: ActiveReply, mut cx: Cx<'_, Self>) {
         let _ = message.entered.send(());
         let _ = message.release.await;
         cx.with(|actor, _| {
@@ -50,27 +47,22 @@ impl Handler<ActiveInterleavedReply> for FairActor {
 
 #[derive(Message)]
 #[message(reply = ())]
-struct ReadyWork;
+struct MailboxWork;
 
-impl DispatchHandler<ReadyWork> for FairActor {
-    fn handle(
-        &mut self,
-        _message: ReadyWork,
-        _scope: &mut ActorScope<Self>,
-    ) -> impl loac::IntoReply<Self, ReadyWork> {
-        self.handled.fetch_add(1, Ordering::SeqCst);
-        ().ready()
+impl Handler<MailboxWork> for FairActor {
+    async fn handle(_message: MailboxWork, mut cx: Cx<'_, Self>) {
+        cx.with(|actor, _| {
+            actor.handled.fetch_add(1, Ordering::SeqCst);
+        });
     }
 }
 
-// Task identity distinguishes spawning from actor-local polling.
-// Progress alone would pass under both implementations.
 #[tokio::test]
-async fn owned_reply_runs_in_a_distinct_tokio_task() {
+async fn reply_stays_on_its_actor_task() {
     let handled = Arc::new(AtomicUsize::new(0));
     let owner = loac::spawn::<FairActor>(handled.clone());
     let actor = owner.actor_ref();
-    assert_eq!(watchdog(actor.call(OwnedTaskIdentity)).await, Ok(true));
+    assert_eq!(watchdog(actor.call(ActorTaskIdentity)).await, Ok(true));
     assert_eq!(
         watchdog(owner.shutdown(Shutdown::Stop)).await.reason(),
         ExitReason::Stopped
@@ -78,7 +70,7 @@ async fn owned_reply_runs_in_a_distinct_tokio_task() {
 }
 
 #[tokio::test]
-async fn ready_mailbox_input_does_not_starve_woken_interleaved_reply() {
+async fn mailbox_input_does_not_starve_woken_reply() {
     let handled = Arc::new(AtomicUsize::new(0));
     let owner = loac::spawn::<FairActor>(handled.clone());
     let actor = owner.actor_ref();
@@ -86,7 +78,7 @@ async fn ready_mailbox_input_does_not_starve_woken_interleaved_reply() {
     let (entered_tx, entered_rx) = oneshot::channel();
     let (release_tx, release_rx) = oneshot::channel();
     let active = actor
-        .try_call(ActiveInterleavedReply {
+        .try_call(ActiveReply {
             entered: entered_tx,
             release: release_rx,
             completed_at: completed_at.clone(),
@@ -97,7 +89,7 @@ async fn ready_mailbox_input_does_not_starve_woken_interleaved_reply() {
     assert!(poll_once(active.as_mut()).await.is_pending());
 
     let queued: Vec<_> = (0..32)
-        .map(|_| actor.try_call(ReadyWork).unwrap())
+        .map(|_| actor.try_call(MailboxWork).unwrap())
         .collect();
     release_tx.send(()).unwrap();
     assert_eq!(watchdog(active).await, Ok(()));
@@ -150,16 +142,10 @@ impl Actor for FairChildExitActor {
     }
 }
 
-impl DispatchHandler<PendingOwned> for FairChildExitActor {
-    fn handle(
-        &mut self,
-        message: PendingOwned,
-        _scope: &mut ActorScope<Self>,
-    ) -> impl loac::IntoReply<Self, PendingOwned> {
-        async move {
-            let _ = message.entered.send(());
-            let _ = message.release.await;
-        }
+impl Handler<PendingReply> for FairChildExitActor {
+    async fn handle(message: PendingReply, _cx: Cx<'_, Self>) {
+        let _ = message.entered.send(());
+        let _ = message.release.await;
     }
 }
 
@@ -171,19 +157,16 @@ impl Handler<ExclusiveGate> for FairChildExitActor {
     }
 }
 
-impl DispatchHandler<ReadyWork> for FairChildExitActor {
-    fn handle(
-        &mut self,
-        _message: ReadyWork,
-        _scope: &mut ActorScope<Self>,
-    ) -> impl loac::IntoReply<Self, ReadyWork> {
-        self.handled.fetch_add(1, Ordering::SeqCst);
-        ().ready()
+impl Handler<MailboxWork> for FairChildExitActor {
+    async fn handle(_message: MailboxWork, mut cx: Cx<'_, Self>) {
+        cx.with(|actor, _| {
+            actor.handled.fetch_add(1, Ordering::SeqCst);
+        });
     }
 }
 
 #[tokio::test(flavor = "current_thread")]
-async fn queued_child_exit_progresses_before_ready_mailbox_is_exhausted() {
+async fn queued_child_exit_progresses_before_mailbox_is_exhausted() {
     let handled = Arc::new(AtomicUsize::new(0));
     let hook_completed_at = Arc::new(AtomicUsize::new(usize::MAX));
     let (child_started_tx, child_started_rx) = oneshot::channel();
@@ -197,15 +180,15 @@ async fn queued_child_exit_progresses_before_ready_mailbox_is_exhausted() {
     let actor = owner.actor_ref();
     let child = watchdog(child_started_rx).await.unwrap();
 
-    let (owned_entered_tx, owned_entered_rx) = oneshot::channel();
-    let (owned_release_tx, owned_release_rx) = oneshot::channel();
-    let owned = actor
-        .try_call(PendingOwned {
-            entered: owned_entered_tx,
-            release: owned_release_rx,
+    let (pending_entered_tx, pending_entered_rx) = oneshot::channel();
+    let (pending_release_tx, pending_release_rx) = oneshot::channel();
+    let pending = actor
+        .try_call(PendingReply {
+            entered: pending_entered_tx,
+            release: pending_release_rx,
         })
         .unwrap();
-    watchdog(owned_entered_rx).await.unwrap();
+    watchdog(pending_entered_rx).await.unwrap();
 
     let (exclusive_entered_tx, exclusive_entered_rx) = oneshot::channel();
     let (exclusive_release_tx, exclusive_release_rx) = oneshot::channel();
@@ -225,15 +208,15 @@ async fn queued_child_exit_progresses_before_ready_mailbox_is_exhausted() {
     assert!(poll_once(hook_completed.as_mut()).await.is_pending());
 
     let queued: Vec<_> = (0..32)
-        .map(|_| actor.try_call(ReadyWork).unwrap())
+        .map(|_| actor.try_call(MailboxWork).unwrap())
         .collect();
     exclusive_release_tx.send(()).unwrap();
     assert_eq!(watchdog(exclusive).await, Ok(()));
     watchdog(hook_completed).await.unwrap();
     assert!(hook_completed_at.load(Ordering::SeqCst) < queued.len());
 
-    owned_release_tx.send(()).unwrap();
-    assert_eq!(watchdog(owned).await, Ok(()));
+    pending_release_tx.send(()).unwrap();
+    assert_eq!(watchdog(pending).await, Ok(()));
     for response in queued {
         assert_eq!(watchdog(response).await, Ok(()));
     }

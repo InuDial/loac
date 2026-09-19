@@ -1,8 +1,8 @@
 use std::sync::{Arc, Barrier};
 
 use loac::{
-    Actor, ActorScope, CallError, DispatchHandler, ExitReason, Message, ReplyExt, Shutdown,
-    ShutdownStatus, StopScope, actor,
+    Actor, ActorScope, CallError, Cx, ExitReason, Handler, Message, Shutdown, ShutdownStatus,
+    StopScope, actor,
 };
 use tokio::sync::oneshot;
 
@@ -23,15 +23,9 @@ impl Actor for PanicActor {
 #[message(reply = ())]
 struct PanicNow;
 
-impl DispatchHandler<PanicNow> for PanicActor {
-    fn handle(
-        &mut self,
-        _message: PanicNow,
-        _scope: &mut ActorScope<'_, Self>,
-    ) -> impl loac::IntoReply<Self, PanicNow> {
+impl Handler<PanicNow> for PanicActor {
+    async fn handle(_message: PanicNow, _cx: Cx<'_, Self>) {
         panic!("intentional handler panic");
-        #[allow(unreachable_code)]
-        ().ready()
     }
 }
 
@@ -56,17 +50,11 @@ struct PanicAfterBarrier {
     barrier: Arc<Barrier>,
 }
 
-impl DispatchHandler<PanicAfterBarrier> for PanicActor {
-    fn handle(
-        &mut self,
-        message: PanicAfterBarrier,
-        _scope: &mut ActorScope<'_, Self>,
-    ) -> impl loac::IntoReply<Self, PanicAfterBarrier> {
-        async move {
-            let _ = message.entered.send(());
-            message.barrier.wait();
-            panic!("panic loses to an already committed Kill");
-        }
+impl Handler<PanicAfterBarrier> for PanicActor {
+    async fn handle(message: PanicAfterBarrier, _cx: Cx<'_, Self>) {
+        let _ = message.entered.send(());
+        message.barrier.wait();
+        panic!("panic loses to an already committed Kill");
     }
 }
 

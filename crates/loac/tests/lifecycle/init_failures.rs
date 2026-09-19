@@ -9,8 +9,8 @@ use std::{
 };
 
 use loac::{
-    Actor, ActorScope, CallError, DispatchHandler, ExitReason, Message, ReplyExt, Shutdown,
-    ShutdownStatus, StopScope, SubtreeStatus, TryCallErrorKind, actor,
+    Actor, ActorScope, CallError, Cx, ExitReason, Handler, Message, Shutdown, ShutdownStatus,
+    StopScope, SubtreeStatus, TryCallErrorKind, actor,
 };
 use tokio::sync::oneshot;
 
@@ -50,14 +50,8 @@ impl Drop for NeverReadyInit {
     }
 }
 
-impl DispatchHandler<InitPing> for NeverReadyInit {
-    fn handle(
-        &mut self,
-        _message: InitPing,
-        _scope: &mut ActorScope<'_, Self>,
-    ) -> impl loac::IntoReply<Self, InitPing> {
-        ().ready()
-    }
+impl Handler<InitPing> for NeverReadyInit {
+    async fn handle(_message: InitPing, _cx: Cx<'_, Self>) {}
 }
 
 struct PreKilledArgs {
@@ -153,14 +147,8 @@ impl Actor for InitChild {
     }
 }
 
-impl DispatchHandler<InitPing> for InitChild {
-    fn handle(
-        &mut self,
-        _message: InitPing,
-        _scope: &mut ActorScope<'_, Self>,
-    ) -> impl loac::IntoReply<Self, InitPing> {
-        ().ready()
-    }
+impl Handler<InitPing> for InitChild {
+    async fn handle(_message: InitPing, _cx: Cx<'_, Self>) {}
 }
 
 struct ReadyDropArgs {
@@ -279,14 +267,8 @@ impl Actor for PanicInit {
     }
 }
 
-impl DispatchHandler<InitPing> for PanicInit {
-    fn handle(
-        &mut self,
-        _message: InitPing,
-        _scope: &mut ActorScope<'_, Self>,
-    ) -> impl loac::IntoReply<Self, InitPing> {
-        ().ready()
-    }
+impl Handler<InitPing> for PanicInit {
+    async fn handle(_message: InitPing, _cx: Cx<'_, Self>) {}
 }
 
 // A synchronous init panic (before any init future exists) must still

@@ -19,20 +19,6 @@ impl<A: Actor> ScopeState<A> {
         ActorScope {
             actor_ref,
             state: self,
-            target: None,
-        }
-    }
-
-    /// Lends runtime scope access backed by stable actor storage.
-    pub(crate) fn running_scope<'a>(
-        &'a mut self,
-        actor_ref: &'a ActorRef<A>,
-        target: CxTarget<A>,
-    ) -> ActorScope<'a, A> {
-        ActorScope {
-            actor_ref,
-            state: self,
-            target: Some(target),
         }
     }
 
@@ -103,22 +89,18 @@ impl<A: Actor> fmt::Debug for StopScope<'_, A> {
 /// [`Actor::on_stop`] receives [`StopScope`] instead.
 ///
 /// The runtime constructs this borrowed view for user actor work.
-/// Handlers use it only during dispatch.
-/// `Cx::with` creates a fresh view for each call.
+/// `Cx::with` creates a fresh handler view for each call.
 /// Initialization and lifecycle hooks may retain it across `await`.
 pub struct ActorScope<'a, A: Actor> {
     pub(crate) actor_ref: &'a ActorRef<A>,
     pub(crate) state: &'a mut ScopeState<A>,
-    pub(crate) target: Option<CxTarget<A>>,
 }
 
 impl<A: Actor> ActorScope<'_, A> {
     /// Returns this actor's non-owning address.
     ///
-    /// Owned replies consume no interleaved capacity.
-    /// Their self-calls still require scheduler dispatch capacity.
-    /// Actors without interleaving have no interleaved capacity gate.
-    /// An interleaved reply needs another slot for its self-call.
+    /// A handler's self-call needs another dispatch slot.
+    /// Serial actors therefore cannot await self-calls.
     /// A scheduler lease blocks its queued self-call.
     ///
     /// A serial lifecycle hook also blocks dispatch. While admission is still

@@ -8,8 +8,8 @@ use std::{
 };
 
 use loac::{
-    Actor, ActorScope, CallError, DispatchHandler, ExitReason, Message, ReplyExt, Shutdown,
-    ShutdownStatus, StopScope, TrySendErrorKind, actor,
+    Actor, ActorScope, CallError, Cx, ExitReason, Handler, Message, Shutdown, ShutdownStatus,
+    StopScope, TrySendErrorKind, actor,
 };
 use tokio::sync::oneshot;
 
@@ -46,15 +46,12 @@ impl Actor for AdmissionActor {
 #[message(reply = ())]
 struct Notify(u8);
 
-impl DispatchHandler<Notify> for AdmissionActor {
-    fn handle(
-        &mut self,
-        message: Notify,
-        _scope: &mut ActorScope<'_, Self>,
-    ) -> impl loac::IntoReply<Self, Notify> {
-        self.value += message.0;
-        self.handled.fetch_add(1, Ordering::SeqCst);
-        ().ready()
+impl Handler<Notify> for AdmissionActor {
+    async fn handle(message: Notify, mut cx: Cx<'_, Self>) {
+        cx.with(|actor, _| {
+            actor.value += message.0;
+            actor.handled.fetch_add(1, Ordering::SeqCst);
+        });
     }
 }
 
@@ -62,13 +59,9 @@ impl DispatchHandler<Notify> for AdmissionActor {
 #[message(reply = (u8, usize))]
 struct Read;
 
-impl DispatchHandler<Read> for AdmissionActor {
-    fn handle(
-        &mut self,
-        _message: Read,
-        _scope: &mut ActorScope<'_, Self>,
-    ) -> impl loac::IntoReply<Self, Read> {
-        (self.value, self.handled.load(Ordering::SeqCst)).ready()
+impl Handler<Read> for AdmissionActor {
+    async fn handle(_message: Read, mut cx: Cx<'_, Self>) -> (u8, usize) {
+        cx.with(|actor, _| (actor.value, actor.handled.load(Ordering::SeqCst)))
     }
 }
 
@@ -165,14 +158,11 @@ impl Actor for ControlledInit {
 #[message(reply = ())]
 struct InitPing;
 
-impl DispatchHandler<InitPing> for ControlledInit {
-    fn handle(
-        &mut self,
-        _message: InitPing,
-        _scope: &mut ActorScope<'_, Self>,
-    ) -> impl loac::IntoReply<Self, InitPing> {
-        self.handled.fetch_add(1, Ordering::SeqCst);
-        ().ready()
+impl Handler<InitPing> for ControlledInit {
+    async fn handle(_message: InitPing, mut cx: Cx<'_, Self>) {
+        cx.with(|actor, _| {
+            actor.handled.fetch_add(1, Ordering::SeqCst);
+        });
     }
 }
 

@@ -4,8 +4,8 @@ use std::{
 };
 
 use loac::{
-    ActorScope, CallError, Cx, DispatchHandler, ExitReason, Handler, Message, ReplyExt, Shutdown,
-    TryCallErrorKind, TrySendErrorKind, spawn_with,
+    CallError, Cx, ExitReason, Handler, Message, Shutdown, TryCallErrorKind, TrySendErrorKind,
+    spawn_with,
 };
 
 use super::{
@@ -17,13 +17,9 @@ use super::{
 #[message(reply = Vec<u8>)]
 struct Snapshot;
 
-impl DispatchHandler<Snapshot> for SerialActor {
-    fn handle(
-        &mut self,
-        _message: Snapshot,
-        _scope: &mut ActorScope<Self>,
-    ) -> impl loac::IntoReply<Self, Snapshot> {
-        lock(&self.committed).clone().ready()
+impl Handler<Snapshot> for SerialActor {
+    async fn handle(_message: Snapshot, mut cx: Cx<'_, Self>) -> Vec<u8> {
+        cx.with(|actor, _| lock(&actor.committed).clone())
     }
 }
 

@@ -2,7 +2,7 @@ use super::*;
 
 struct StopActor;
 
-#[actor(mailbox = 4)]
+#[actor(mailbox = 4, interleaved = 3)]
 impl Actor for StopActor {
     type SpawnArgs = ();
 
@@ -13,29 +13,23 @@ impl Actor for StopActor {
 
 #[derive(Message)]
 #[message(reply = ())]
-struct StopOwned {
+struct StopWork {
     entered: oneshot::Sender<()>,
     release: oneshot::Receiver<()>,
 }
 
-impl DispatchHandler<StopOwned> for StopActor {
-    fn handle(
-        &mut self,
-        message: StopOwned,
-        _scope: &mut ActorScope<Self>,
-    ) -> impl loac::IntoReply<Self, StopOwned> {
-        async move {
-            let _ = message.entered.send(());
-            let _ = message.release.await;
-        }
+impl Handler<StopWork> for StopActor {
+    async fn handle(message: StopWork, _cx: Cx<'_, Self>) {
+        let _ = message.entered.send(());
+        let _ = message.release.await;
     }
 }
 
 #[tokio::test]
-async fn owned_replies_need_no_interleaving_and_graceful_shutdown_waits() {
-    // All three owned tasks must start concurrently.
+async fn graceful_shutdown_waits_for_every_scheduled_reply() {
+    // All three replies must start concurrently.
     // Each partial release must leave shutdown pending.
-    // That proves shutdown waits for every owned task.
+    // That proves shutdown waits for every reply.
     for (shutdown, expected) in [
         (Shutdown::Stop, ExitReason::Stopped),
         (Shutdown::Drain, ExitReason::Drained),
@@ -51,7 +45,7 @@ async fn owned_replies_need_no_interleaving_and_graceful_shutdown_waits() {
             let (release_tx, release_rx) = oneshot::channel();
             replies.push(
                 actor
-                    .try_call(StopOwned {
+                    .try_call(StopWork {
                         entered: entered_tx,
                         release: release_rx,
                     })

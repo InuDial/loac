@@ -8,6 +8,8 @@ use super::*;
 ///
 /// Every mutable actor access originates from this cell.
 /// Actor-aware operations never overlap.
+/// Handler dispatch copies only a target pointer.
+/// It never materializes a mutable actor reference.
 /// Scheduled futures always drop before this cell.
 /// Thus, retained `Cx` targets remain valid during destruction.
 pub(crate) struct ActorAccess<A: Actor> {
@@ -46,14 +48,13 @@ impl<A: Actor> ActorAccess<A> {
 
     /// Lends actor and scope access for one serialized runtime operation.
     pub(crate) fn parts(&mut self) -> (&mut A, ActorScope<'_, A>) {
-        let target = self.target();
         let cell = self.cell.as_ref().get_ref();
         // SAFETY: the actor task owns this cell. Callers never retain these
         // references while polling another actor operation.
         let actor = unsafe { &mut *cell.actor.get() };
         // SAFETY: actor state and scope state occupy separate cells.
         let state = unsafe { &mut *cell.state.get() };
-        let scope = state.running_scope(&cell.actor_ref, target);
+        let scope = state.actor_scope(&cell.actor_ref);
         (actor, scope)
     }
 
@@ -82,7 +83,7 @@ impl<A: Actor> ActorAccess<A> {
         f(unsafe { &mut *cell.actor.get() })
     }
 
-    fn target(&self) -> CxTarget<A> {
+    pub(crate) fn target(&self) -> CxTarget<A> {
         CxTarget(NonNull::from(self.cell.as_ref().get_ref()))
     }
 }
@@ -114,7 +115,7 @@ impl<A: Actor> CxTarget<A> {
         let actor = unsafe { &mut *cell.actor.get() };
         // SAFETY: scope state occupies a separate stable cell.
         let state = unsafe { &mut *cell.state.get() };
-        let mut scope = state.running_scope(&cell.actor_ref, *self);
+        let mut scope = state.actor_scope(&cell.actor_ref);
         f(actor, &mut scope)
     }
 }

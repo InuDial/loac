@@ -1,8 +1,8 @@
 use std::num::NonZeroUsize;
 
 use loac::{
-    Actor, ActorOwner, ActorScope, DispatchHandler, ExitReason, Message, ReplyExt, Shutdown,
-    SpawnOptions, TrySendErrorKind, actor, spawn_with,
+    Actor, ActorOwner, ActorScope, Cx, ExitReason, Handler, Message, Shutdown, SpawnOptions,
+    TrySendErrorKind, actor, spawn_with,
 };
 use tokio::sync::oneshot;
 
@@ -24,14 +24,8 @@ impl Actor for DynamicActor {
     }
 }
 
-impl DispatchHandler<Ping> for DynamicActor {
-    fn handle(
-        &mut self,
-        _message: Ping,
-        _scope: &mut ActorScope<Self>,
-    ) -> impl loac::IntoReply<Self, Ping> {
-        ().ready()
-    }
+impl Handler<Ping> for DynamicActor {
+    async fn handle(_message: Ping, _cx: Cx<'_, Self>) {}
 }
 
 struct CustomDynamicActor;
@@ -46,14 +40,8 @@ impl Actor for CustomDynamicActor {
     }
 }
 
-impl DispatchHandler<Ping> for CustomDynamicActor {
-    fn handle(
-        &mut self,
-        _message: Ping,
-        _scope: &mut ActorScope<Self>,
-    ) -> impl loac::IntoReply<Self, Ping> {
-        ().ready()
-    }
+impl Handler<Ping> for CustomDynamicActor {
+    async fn handle(_message: Ping, _cx: Cx<'_, Self>) {}
 }
 
 struct FixedActor;
@@ -68,14 +56,8 @@ impl Actor for FixedActor {
     }
 }
 
-impl DispatchHandler<Ping> for FixedActor {
-    fn handle(
-        &mut self,
-        _message: Ping,
-        _scope: &mut ActorScope<Self>,
-    ) -> impl loac::IntoReply<Self, Ping> {
-        ().ready()
-    }
+impl Handler<Ping> for FixedActor {
+    async fn handle(_message: Ping, _cx: Cx<'_, Self>) {}
 }
 
 struct UnboundedActor;
@@ -90,19 +72,13 @@ impl Actor for UnboundedActor {
     }
 }
 
-impl DispatchHandler<Ping> for UnboundedActor {
-    fn handle(
-        &mut self,
-        _message: Ping,
-        _scope: &mut ActorScope<Self>,
-    ) -> impl loac::IntoReply<Self, Ping> {
-        ().ready()
-    }
+impl Handler<Ping> for UnboundedActor {
+    async fn handle(_message: Ping, _cx: Cx<'_, Self>) {}
 }
 
 async fn assert_bounded_capacity<A>(owner: ActorOwner<A>, capacity: usize)
 where
-    A: DispatchHandler<Ping>,
+    A: Handler<Ping>,
 {
     let actor = owner.actor_ref();
     for _ in 0..capacity {

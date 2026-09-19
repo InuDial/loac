@@ -5,9 +5,9 @@ use std::{
 };
 
 use crate::{
-    Actor, ActorScope,
+    Actor, ActorScope, Cx,
+    access::ScopedLease,
     mailbox::{ActorInner, Control, Envelope},
-    owned::OwnedTasks,
     scheduling::ActorScheduler,
 };
 
@@ -35,9 +35,8 @@ struct ProbeEnvelope {
 impl Envelope<TestActor> for ProbeEnvelope {
     fn dispatch(
         self: Box<Self>,
-        _actor: &mut TestActor,
-        _scope: &mut ActorScope<TestActor>,
-        _owned: &OwnedTasks<TestActor>,
+        _cx: Cx<'_, TestActor>,
+        _lease: ScopedLease<'_, TestActor>,
         _scheduler: &mut ActorScheduler<TestActor>,
         _inner: &Arc<ActorInner<TestActor>>,
     ) {

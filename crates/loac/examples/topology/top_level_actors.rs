@@ -20,13 +20,9 @@ impl Actor for Worker {
 #[message(reply = u64)]
 struct Multiply(u64);
 
-impl DispatchHandler<Multiply> for Worker {
-    fn handle(
-        &mut self,
-        message: Multiply,
-        _scope: &mut ActorScope<Self>,
-    ) -> impl loac::IntoReply<Self, Multiply> {
-        (self.factor * message.0).ready()
+impl Handler<Multiply> for Worker {
+    async fn handle(message: Multiply, mut cx: Cx<'_, Self>) -> u64 {
+        cx.with(|actor, _| actor.factor * message.0)
     }
 }
 

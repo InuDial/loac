@@ -1,4 +1,4 @@
-//! Built-in actor-aware reply scheduling profiles.
+//! Built-in reply concurrency profiles.
 //!
 //! [`#[actor(...)]`](macro@crate::actor) selects one profile:
 //!
@@ -11,13 +11,9 @@
 //! The macro reference documents syntax and defaults.
 //! Manual [`crate::MessageConfig`] implementations select a profile directly.
 //!
-//! A finite limit bounds active interleaved replies.
+//! A finite limit bounds active replies.
 //! At the limit, dispatch pauses before the next handler.
-//! The reply mode becomes known only after handler dispatch.
-//! Every queued handler must therefore pass the same gate.
-//!
-//! Ready replies finish during dispatch.
-//! Owned replies run in separate Tokio tasks.
+//! Every handler future runs on its actor task.
 //! A [`Cx`](crate::Cx) reply may hold a scheduler lease.
 
 mod profile;
@@ -39,31 +35,18 @@ use crate::{
     mailbox::Control,
 };
 
-pub use profile::{
-    Disabled, Dynamic, Fixed, InterleavedScheduler, SchedulerProfile, Serial, Unbounded,
-};
-pub(crate) use runtime::{ActorScheduler, RuntimeScheduler, SchedulerTurn, Seal, TurnContext};
+pub use profile::{Disabled, Dynamic, Fixed, SchedulerProfile, Serial, Unbounded};
+pub(crate) use runtime::{ActorScheduler, RuntimeScheduler, SchedulerTurn, TurnContext};
 pub(crate) use state::{
-    DynamicLimit, FixedLimit, InterleavedLane, InterleavedProfile, InterleavedState, SerialLane,
-    UnboundedLimit,
+    DynamicLimit, FixedLimit, ReplyLane, ReplyProfile, ReplyState, UnboundedLimit,
 };
 
 pub(crate) struct ScheduledFuture {
     future: Pin<Box<dyn Future<Output = ()> + Send + 'static>>,
-    lease: Option<Arc<ReplyLease>>,
+    lease: Arc<ReplyLease>,
 }
 
 impl ScheduledFuture {
-    pub(crate) fn new<F>(future: F) -> Self
-    where
-        F: Future<Output = ()> + Send + 'static,
-    {
-        Self {
-            future: Box::pin(future),
-            lease: None,
-        }
-    }
-
     /// Erases one actor-scoped future after establishing its runtime owner.
     ///
     /// The scheduler owns both the future and its lease afterward.
@@ -80,6 +63,7 @@ impl ScheduledFuture {
         // The actor task is their sole poller and cancellation owner.
         // RunningActor drops its scheduler before its pinned actor storage.
         // Cx exposes actor borrows only through higher-ranked closures.
+        // Handler construction never receives a mutable actor reference.
         // The paired lease serializes every actor-aware future poll.
         let future = unsafe {
             std::mem::transmute::<
@@ -87,10 +71,7 @@ impl ScheduledFuture {
                 Pin<Box<dyn Future<Output = ()> + Send + 'static>>,
             >(future)
         };
-        Self {
-            future,
-            lease: Some(lease),
-        }
+        Self { future, lease }
     }
 
     fn poll(&mut self, task: &mut Context<'_>) -> Poll<()> {
@@ -98,7 +79,7 @@ impl ScheduledFuture {
     }
 
     fn is_leased(&self) -> bool {
-        self.lease.as_ref().is_some_and(|lease| lease.is_held())
+        self.lease.is_held()
     }
 
     /// Wraps ordinary test work with an inactive lease.
@@ -107,7 +88,10 @@ impl ScheduledFuture {
     where
         F: Future<Output = ()> + Send + 'static,
     {
-        Self::new(future)
+        Self {
+            future: Box::pin(future),
+            lease: ReplyLease::new(),
+        }
     }
 
     /// Wraps test work with a lease acquired after queue insertion.
@@ -119,7 +103,7 @@ impl ScheduledFuture {
         let lease = ReplyLease::new();
         let scheduled = Self {
             future: Box::pin(future),
-            lease: Some(Arc::clone(&lease)),
+            lease: Arc::clone(&lease),
         };
         (scheduled, lease)
     }

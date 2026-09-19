@@ -5,20 +5,19 @@ use std::{
     num::NonZeroUsize,
     pin::Pin,
     sync::{
-        Arc, Mutex,
+        Arc,
         atomic::{AtomicUsize, Ordering},
     },
     task::{Context, Poll},
 };
 
 use loac::{
-    Actor, ActorRef, ActorScope, CallError, ChildExit, Cx, DispatchHandler, ExitReason, Handler,
-    InterleavedFutureExt, Message, ReplyExt, Response, Shutdown, SpawnOptions, StreamHandler,
-    StreamOut, actor, reply, spawn_with,
+    Actor, ActorRef, ActorScope, CallError, ChildExit, Cx, ExitReason, Handler, Message, Response,
+    Shutdown, SpawnOptions, StreamHandler, StreamOut, actor, spawn_with,
 };
 use tokio::sync::{mpsc, oneshot};
 
-use support::{lock, watchdog};
+use support::watchdog;
 
 async fn poll_once<F: Future>(mut future: Pin<&mut F>) -> Poll<F::Output> {
     std::future::poll_fn(|task| Poll::Ready(future.as_mut().poll(task))).await
@@ -26,7 +25,7 @@ async fn poll_once<F: Future>(mut future: Pin<&mut F>) -> Poll<F::Output> {
 
 #[derive(Message)]
 #[message(reply = ())]
-struct PendingOwned {
+struct PendingReply {
     entered: oneshot::Sender<()>,
     release: oneshot::Receiver<()>,
 }
@@ -46,14 +45,11 @@ impl Actor for HookChild {
 #[message(reply = ())]
 struct StopChild;
 
-impl DispatchHandler<StopChild> for HookChild {
-    fn handle(
-        &mut self,
-        _message: StopChild,
-        scope: &mut ActorScope<Self>,
-    ) -> impl loac::IntoReply<Self, StopChild> {
-        let _ = scope.request_shutdown(Shutdown::Stop);
-        ().ready()
+impl Handler<StopChild> for HookChild {
+    async fn handle(_message: StopChild, mut cx: Cx<'_, Self>) {
+        cx.with(|_, scope| {
+            let _ = scope.request_shutdown(Shutdown::Stop);
+        });
     }
 }
 
@@ -74,8 +70,6 @@ mod cx_exclusive;
 mod exclusive;
 #[path = "replies/fairness.rs"]
 mod fairness;
-#[path = "replies/owned.rs"]
-mod owned;
 #[path = "replies/panic.rs"]
 mod panic;
 #[path = "replies/self_call.rs"]

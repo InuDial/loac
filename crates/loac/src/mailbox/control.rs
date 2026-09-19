@@ -12,13 +12,11 @@ use std::{
     task::{Context, Wake, Waker},
 };
 
-use tokio::sync::{Notify, watch};
-use tokio_util::sync::CancellationToken;
-
 use crate::{
     Actor, CallError, ExitReason, ExitStatus, Shutdown, ShutdownStatus,
     transport::{ErasedEnvelope, MessageReservation},
 };
+use tokio::sync::{Notify, watch};
 
 use super::{ActorInner, Envelope};
 
@@ -101,7 +99,6 @@ pub(crate) struct Control {
     // Mode remains authoritative.
     // This hint keeps each actor turn off watch::changed().
     actor_wake: Notify,
-    owned_cancellation: CancellationToken,
 }
 
 impl Control {
@@ -111,7 +108,6 @@ impl Control {
         Self {
             mode,
             actor_wake: Notify::new(),
-            owned_cancellation: CancellationToken::new(),
         }
     }
 
@@ -132,13 +128,6 @@ impl Control {
 
     pub(crate) fn subscribe_mode(&self) -> watch::Receiver<Mode> {
         self.mode.subscribe()
-    }
-
-    /// Returns the private signal used to wake owned tasks after hard cutoff.
-    ///
-    /// [`Mode`] remains authoritative. Tasks also read it before each user poll.
-    pub(crate) fn owned_cancellation(&self) -> CancellationToken {
-        self.owned_cancellation.clone()
     }
 
     /// Waits for a private lifecycle hint.
@@ -304,12 +293,9 @@ impl Control {
     /// Runs one lifecycle transaction against the sole authoritative value.
     ///
     /// The private actor hint commits before public notification.
-    /// Owned cancellation runs after releasing the watch lock.
-    /// Their wakers belong only to Tokio tasks.
-    /// A public observer panic cannot stall either path.
+    /// A public observer panic cannot stall actor notification.
     fn transact<T>(&self, transaction: impl FnOnce(Mode) -> (Mode, T)) -> T {
         let mut result = None;
-        let mut cancel_owned = false;
         let notification = panic::catch_unwind(AssertUnwindSafe(|| {
             self.mode.send_if_modified(|mode| {
                 let (next, output) = transaction(*mode);
@@ -318,15 +304,10 @@ impl Control {
                 *mode = next;
                 if changed {
                     self.actor_wake.notify_one();
-                    cancel_owned = matches!(next, Mode::Killing | Mode::Failing | Mode::Aborting);
                 }
                 changed
             });
         }));
-        if cancel_owned {
-            self.owned_cancellation.cancel();
-        }
-
         match (result, notification) {
             (Some(output), Ok(())) => output,
             (Some(output), Err(payload)) => {
@@ -436,8 +417,8 @@ pub(crate) struct HookEntryPermit(());
 pub(super) struct CompletionPermit(());
 
 impl<A: Actor> DispatchPermit<'_, A> {
-    /// Pays for shared ownership only when reply work escapes dispatch.
-    pub(super) fn into_owned(self) -> DispatchPermit<'static, A> {
+    /// Retains shared lifecycle access for scheduled work.
+    pub(super) fn into_shared(self) -> DispatchPermit<'static, A> {
         DispatchPermit {
             actor: Cow::Owned(self.actor.into_owned()),
         }

@@ -8,8 +8,8 @@ use std::{
 };
 
 use loac::{
-    Actor, ActorScope, DispatchHandler, ExitReason, Message, Recipient, ReplyExt, Shutdown,
-    TryCallErrorKind, TrySendErrorKind, actor,
+    Actor, ActorScope, Cx, ExitReason, Handler, Message, Recipient, Shutdown, TryCallErrorKind,
+    TrySendErrorKind, actor,
 };
 use tokio::sync::oneshot;
 
@@ -45,23 +45,15 @@ impl Actor for Right {
 #[message(reply = u64)]
 struct Query(u64);
 
-impl DispatchHandler<Query> for Left {
-    fn handle(
-        &mut self,
-        message: Query,
-        _scope: &mut ActorScope<Self>,
-    ) -> impl loac::IntoReply<Self, Query> {
-        (message.0 + 1).ready()
+impl Handler<Query> for Left {
+    async fn handle(message: Query, _cx: Cx<'_, Self>) -> u64 {
+        message.0 + 1
     }
 }
 
-impl DispatchHandler<Query> for Right {
-    fn handle(
-        &mut self,
-        message: Query,
-        _scope: &mut ActorScope<Self>,
-    ) -> impl loac::IntoReply<Self, Query> {
-        (message.0 * 2).ready()
+impl Handler<Query> for Right {
+    async fn handle(message: Query, _cx: Cx<'_, Self>) -> u64 {
+        message.0 * 2
     }
 }
 
@@ -69,25 +61,15 @@ impl DispatchHandler<Query> for Right {
 #[message(reply = ())]
 struct Notify(oneshot::Sender<()>);
 
-impl DispatchHandler<Notify> for Left {
-    fn handle(
-        &mut self,
-        message: Notify,
-        _scope: &mut ActorScope<Self>,
-    ) -> impl loac::IntoReply<Self, Notify> {
+impl Handler<Notify> for Left {
+    async fn handle(message: Notify, _cx: Cx<'_, Self>) {
         let _ = message.0.send(());
-        ().ready()
     }
 }
 
-impl DispatchHandler<Notify> for Right {
-    fn handle(
-        &mut self,
-        message: Notify,
-        _scope: &mut ActorScope<Self>,
-    ) -> impl loac::IntoReply<Self, Notify> {
+impl Handler<Notify> for Right {
+    async fn handle(message: Notify, _cx: Cx<'_, Self>) {
         let _ = message.0.send(());
-        ().ready()
     }
 }
 
@@ -157,21 +139,15 @@ impl SlowQuery {
     }
 }
 
-impl DispatchHandler<SlowQuery> for GateActor {
-    fn handle(
-        &mut self,
-        message: SlowQuery,
-        _scope: &mut ActorScope<Self>,
-    ) -> impl loac::IntoReply<Self, SlowQuery> {
-        async move {
-            if let Some(entered) = message.entered {
-                let _ = entered.send(());
-            }
-            if let Some(release) = message.release {
-                let _ = release.await;
-            }
-            message.value
+impl Handler<SlowQuery> for GateActor {
+    async fn handle(message: SlowQuery, _cx: Cx<'_, Self>) -> u8 {
+        if let Some(entered) = message.entered {
+            let _ = entered.send(());
         }
+        if let Some(release) = message.release {
+            let _ = release.await;
+        }
+        message.value
     }
 }
 
@@ -179,14 +155,11 @@ impl DispatchHandler<SlowQuery> for GateActor {
 #[message(reply = ())]
 struct Mark(u8);
 
-impl DispatchHandler<Mark> for GateActor {
-    fn handle(
-        &mut self,
-        message: Mark,
-        _scope: &mut ActorScope<Self>,
-    ) -> impl loac::IntoReply<Self, Mark> {
-        self.seen.fetch_add(message.0 as usize, Ordering::SeqCst);
-        ().ready()
+impl Handler<Mark> for GateActor {
+    async fn handle(message: Mark, mut cx: Cx<'_, Self>) {
+        cx.with(|actor, _| {
+            actor.seen.fetch_add(message.0 as usize, Ordering::SeqCst);
+        });
     }
 }
 
@@ -194,13 +167,9 @@ impl DispatchHandler<Mark> for GateActor {
 #[message(reply = usize)]
 struct Snapshot;
 
-impl DispatchHandler<Snapshot> for GateActor {
-    fn handle(
-        &mut self,
-        _message: Snapshot,
-        _scope: &mut ActorScope<Self>,
-    ) -> impl loac::IntoReply<Self, Snapshot> {
-        self.seen.load(Ordering::SeqCst).ready()
+impl Handler<Snapshot> for GateActor {
+    async fn handle(_message: Snapshot, mut cx: Cx<'_, Self>) -> usize {
+        cx.with(|actor, _| actor.seen.load(Ordering::SeqCst))
     }
 }
 

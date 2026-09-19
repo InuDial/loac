@@ -173,7 +173,7 @@ fn poll_futures(
     sweep: &mut SweepState,
     control: &Control,
     task: &mut Context<'_>,
-) -> InterleavedPoll {
+) -> ReplyPoll {
     poll_round_robin(
         items,
         sweep,
@@ -194,7 +194,7 @@ fn empty_poll_keeps_the_sweep_unallocated() {
 
     assert_eq!(
         poll_futures(&mut items, &mut sweep, &actor.control, &mut task),
-        InterleavedPoll::Pending
+        ReplyPoll::Pending
     );
     assert!(sweep.wake.is_none());
 }
@@ -209,7 +209,7 @@ fn polling_allocates_the_sweep_until_the_queue_empties() {
 
     assert_eq!(
         poll_futures(&mut items, &mut sweep, &actor.control, &mut task),
-        InterleavedPoll::Pending
+        ReplyPoll::Pending
     );
     let wake = Arc::downgrade(
         sweep
@@ -221,7 +221,7 @@ fn polling_allocates_the_sweep_until_the_queue_empties() {
     items.clear();
     assert_eq!(
         poll_futures(&mut items, &mut sweep, &actor.control, &mut task),
-        InterleavedPoll::Pending
+        ReplyPoll::Pending
     );
     assert!(sweep.wake.is_none());
     assert!(wake.upgrade().is_none());
@@ -242,7 +242,7 @@ fn proxy_contains_actor_task_wake_panic() {
 
     assert_eq!(
         poll_futures(&mut items, &mut sweep, &actor.control, &mut task),
-        InterleavedPoll::Pending
+        ReplyPoll::Pending
     );
     proxy
         .lock()
@@ -264,7 +264,7 @@ fn budget_continuation_contains_actor_task_wake_panic() {
 
     assert_eq!(
         poll_futures(&mut items, &mut sweep, &actor.control, &mut task),
-        InterleavedPoll::BudgetExhausted
+        ReplyPoll::BudgetExhausted
     );
 }
 
@@ -284,7 +284,7 @@ fn confirmation_wake_contains_actor_task_wake_panic() {
 
     assert_eq!(
         poll_futures(&mut items, &mut sweep, &actor.control, &mut first_task),
-        InterleavedPoll::BudgetExhausted
+        ReplyPoll::BudgetExhausted
     );
     retained
         .lock()
@@ -297,7 +297,7 @@ fn confirmation_wake_contains_actor_task_wake_panic() {
     let mut second_task = Context::from_waker(&waker);
     assert_eq!(
         poll_futures(&mut items, &mut sweep, &actor.control, &mut second_task),
-        InterleavedPoll::Pending
+        ReplyPoll::Pending
     );
 }
 
@@ -317,12 +317,12 @@ fn clearing_detaches_a_retained_proxy_waker() {
 
     assert_eq!(
         poll_futures(&mut items, &mut sweep, &actor.control, &mut task),
-        InterleavedPoll::Pending
+        ReplyPoll::Pending
     );
     items.clear();
     assert_eq!(
         poll_futures(&mut items, &mut sweep, &actor.control, &mut task),
-        InterleavedPoll::Pending
+        ReplyPoll::Pending
     );
 
     retained
@@ -384,7 +384,7 @@ fn budgeted_scan_resumes_at_the_unpolled_tail() {
 
     assert_eq!(
         poll_futures(&mut items, &mut sweep, &actor.control, &mut task),
-        InterleavedPoll::BudgetExhausted
+        ReplyPoll::BudgetExhausted
     );
     assert!(
         polls[..ACTIVE_POLL_BUDGET]
@@ -400,7 +400,7 @@ fn budgeted_scan_resumes_at_the_unpolled_tail() {
 
     assert_eq!(
         poll_futures(&mut items, &mut sweep, &actor.control, &mut task),
-        InterleavedPoll::Pending
+        ReplyPoll::Pending
     );
     assert!(polls.iter().all(|count| count.load(Ordering::SeqCst) == 1));
     assert_eq!(wakes.0.load(Ordering::SeqCst), 1);
@@ -425,20 +425,20 @@ fn future_wake_coalesced_with_continuation_starts_another_sweep() {
 
     assert_eq!(
         poll_futures(&mut items, &mut sweep, &actor.control, &mut task),
-        InterleavedPoll::BudgetExhausted
+        ReplyPoll::BudgetExhausted
     );
     first_waker.lock().unwrap().as_ref().unwrap().wake_by_ref();
     assert!(notified.0.swap(false, Ordering::SeqCst));
 
     assert_eq!(
         poll_futures(&mut items, &mut sweep, &actor.control, &mut task),
-        InterleavedPoll::Pending
+        ReplyPoll::Pending
     );
     assert!(notified.0.swap(false, Ordering::SeqCst));
 
     assert_eq!(
         poll_futures(&mut items, &mut sweep, &actor.control, &mut task),
-        InterleavedPoll::BudgetExhausted
+        ReplyPoll::BudgetExhausted
     );
     assert_eq!(first_polls.load(Ordering::SeqCst), 2);
 }
@@ -465,12 +465,12 @@ fn completion_at_budget_cut_yields_before_resuming_tail() {
 
     assert_eq!(
         poll_futures(&mut items, &mut sweep, &actor.control, &mut task),
-        InterleavedPoll::BudgetExhausted
+        ReplyPoll::BudgetExhausted
     );
     assert_eq!(wakes.0.load(Ordering::SeqCst), 1);
     assert_eq!(
         poll_futures(&mut items, &mut sweep, &actor.control, &mut task),
-        InterleavedPoll::Pending
+        ReplyPoll::Pending
     );
     assert!(polls.iter().all(|count| count.load(Ordering::SeqCst) == 1));
 }
@@ -518,7 +518,7 @@ fn completed_future_drop_panic_is_contained_after_removal() {
         poll_futures(&mut items, &mut sweep, &actor.control, &mut task)
     }));
 
-    assert!(matches!(result, Ok(InterleavedPoll::Progress)));
+    assert!(matches!(result, Ok(ReplyPoll::Progress)));
     assert!(items.is_empty());
     assert!(sweep.wake.is_none());
     assert_eq!(drops.load(Ordering::SeqCst), 1);
@@ -545,7 +545,7 @@ fn kill_committed_by_one_reply_stops_the_sweep() {
 
     assert_eq!(
         poll_futures(&mut items, &mut sweep, &actor.control, &mut task),
-        InterleavedPoll::Progress
+        ReplyPoll::Progress
     );
     assert_eq!(first_polls.load(Ordering::SeqCst), 1);
     assert_eq!(second_polls.load(Ordering::SeqCst), 0);

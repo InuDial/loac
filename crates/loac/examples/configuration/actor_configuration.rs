@@ -6,7 +6,7 @@
 
 use std::num::NonZeroUsize;
 
-use loac::{DispatchHandler, ReplyExt, SpawnOptions, prelude::*};
+use loac::{SpawnOptions, prelude::*};
 
 const DEFAULT_MAILBOX_CAPACITY: usize = 32;
 const MAILBOX_DISPATCH_BUDGET: usize = 8;
@@ -32,13 +32,9 @@ impl Actor for Service {
 #[message(reply = &'static str)]
 struct HealthCheck;
 
-impl DispatchHandler<HealthCheck> for Service {
-    fn handle(
-        &mut self,
-        _message: HealthCheck,
-        _scope: &mut ActorScope<Self>,
-    ) -> impl loac::IntoReply<Self, HealthCheck> {
-        "ready".ready()
+impl Handler<HealthCheck> for Service {
+    async fn handle(_message: HealthCheck, _cx: Cx<'_, Self>) -> &'static str {
+        "ready"
     }
 }
 

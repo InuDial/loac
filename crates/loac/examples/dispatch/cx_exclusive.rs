@@ -26,13 +26,9 @@ impl Actor for Counter {
 #[message(reply = u64)]
 struct Read;
 
-impl DispatchHandler<Read> for Counter {
-    fn handle(
-        &mut self,
-        _message: Read,
-        _scope: &mut ActorScope<Self>,
-    ) -> impl loac::IntoReply<Self, Read> {
-        self.0.ready()
+impl Handler<Read> for Counter {
+    async fn handle(_message: Read, mut cx: Cx<'_, Self>) -> u64 {
+        cx.with(|actor, _| actor.0)
     }
 }
 

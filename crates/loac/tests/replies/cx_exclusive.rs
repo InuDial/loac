@@ -27,7 +27,7 @@ impl Handler<CxExclusiveIncrement> for CxExclusiveCounter {
 }
 
 #[tokio::test]
-async fn cx_exclusive_guard_runs_on_the_interleaved_lane() {
+async fn cx_exclusive_guard_pauses_scheduled_work() {
     let owner = loac::spawn::<CxExclusiveCounter>(0);
     let actor = owner.actor_ref();
 

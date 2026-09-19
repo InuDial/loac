@@ -17,9 +17,7 @@ use std::{
     sync::{Arc, Mutex},
 };
 
-use loac::{
-    Actor, ActorScope, Cx, DispatchHandler, Handler, Message, ReplyExt, SpawnOptions, actor,
-};
+use loac::{Actor, ActorScope, Cx, Handler, Message, SpawnOptions, actor};
 use tokio::sync::oneshot;
 
 use support::lock;
@@ -56,14 +54,10 @@ impl Handler<Block> for SerialActor {
 #[message(reply = u8)]
 struct Record(u8);
 
-impl DispatchHandler<Record> for SerialActor {
-    fn handle(
-        &mut self,
-        message: Record,
-        _scope: &mut ActorScope<Self>,
-    ) -> impl loac::IntoReply<Self, Record> {
-        lock(&self.committed).push(message.0);
-        message.0.ready()
+impl Handler<Record> for SerialActor {
+    async fn handle(message: Record, mut cx: Cx<'_, Self>) -> u8 {
+        cx.with(|actor, _| lock(&actor.committed).push(message.0));
+        message.0
     }
 }
 
@@ -71,14 +65,9 @@ impl DispatchHandler<Record> for SerialActor {
 #[message(reply = ())]
 struct Notify(u8);
 
-impl DispatchHandler<Notify> for SerialActor {
-    fn handle(
-        &mut self,
-        message: Notify,
-        _scope: &mut ActorScope<Self>,
-    ) -> impl loac::IntoReply<Self, Notify> {
-        lock(&self.committed).push(message.0);
-        ().ready()
+impl Handler<Notify> for SerialActor {
+    async fn handle(message: Notify, mut cx: Cx<'_, Self>) {
+        cx.with(|actor, _| lock(&actor.committed).push(message.0));
     }
 }
 

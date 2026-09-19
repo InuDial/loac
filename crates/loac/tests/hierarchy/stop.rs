@@ -1,8 +1,8 @@
 use std::sync::{Arc, Mutex};
 
 use loac::{
-    Actor, ActorRef, ActorScope, DispatchHandler, ExitReason, Message, ReplyExt, Shutdown,
-    ShutdownStatus, StopScope, actor,
+    Actor, ActorRef, ActorScope, Cx, ExitReason, Handler, Message, Shutdown, ShutdownStatus,
+    StopScope, actor,
 };
 use tokio::sync::oneshot;
 
@@ -54,14 +54,8 @@ impl Actor for LogParent {
 #[message(reply = ())]
 struct ParentPing;
 
-impl DispatchHandler<ParentPing> for LogParent {
-    fn handle(
-        &mut self,
-        _message: ParentPing,
-        _scope: &mut ActorScope<'_, Self>,
-    ) -> impl loac::IntoReply<Self, ParentPing> {
-        ().ready()
-    }
+impl Handler<ParentPing> for LogParent {
+    async fn handle(_message: ParentPing, _cx: Cx<'_, Self>) {}
 }
 
 // Stop cleans children before the parent's terminal event.

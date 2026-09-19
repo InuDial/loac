@@ -1,8 +1,8 @@
 //! Full-mailbox admission and drain benchmarks.
 //!
 //! `saturated_try_call_full` keeps the queue full while measuring synchronous
-//! rejected admissions. `saturated_ready_drain` fills the queue before timing
-//! and measures dispatching and completing that fixed ready backlog. Neither
+//! rejected admissions. `saturated_drain` fills the queue before timing.
+//! It measures dispatching and completing that fixed backlog. Neither
 //! metric includes actor startup, queue setup, or shutdown.
 
 use std::{
@@ -13,8 +13,8 @@ use std::{
 
 use criterion::{BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
 use loac::{
-    Actor, ActorOwner, ActorRef, ActorScope, DispatchHandler, ExitReason, Message, ReplyExt,
-    Response, Shutdown, SpawnOptions, TryCallErrorKind, spawn_with,
+    Actor, ActorOwner, ActorRef, ActorScope, Cx, ExitReason, Handler, Message, Response, Shutdown,
+    SpawnOptions, TryCallErrorKind, spawn_with,
 };
 
 const MAILBOX_CAPACITIES: [usize; 3] = [1, 32, 256];
@@ -32,19 +32,12 @@ impl Actor for MailboxActor {
 
 #[derive(Message)]
 #[message(reply = ())]
-struct ReadyTraffic;
+struct Traffic;
 
-impl DispatchHandler<ReadyTraffic> for MailboxActor {
-    fn handle(
-        &mut self,
-        _message: ReadyTraffic,
-        _scope: &mut ActorScope<Self>,
-    ) -> impl loac::IntoReply<Self, ReadyTraffic> {
-        ().ready()
-    }
+impl Handler<Traffic> for MailboxActor {
+    async fn handle(_message: Traffic, _cx: Cx<'_, Self>) {}
 }
 
-/// Ready replies leave no interleaved work active.
 fn spawn_benchmark_actor(capacity: usize) -> ActorOwner<MailboxActor> {
     let capacity = NonZeroUsize::new(capacity).expect("mailbox capacities are non-zero");
     spawn_with::<MailboxActor>(
@@ -58,7 +51,7 @@ fn fill_mailbox(actor: &ActorRef<MailboxActor>, capacity: usize) -> Vec<Response
     (0..capacity)
         .map(|_| {
             actor
-                .try_call(ReadyTraffic)
+                .try_call(Traffic)
                 .expect("each configured mailbox slot accepts one request")
         })
         .collect()
@@ -66,7 +59,7 @@ fn fill_mailbox(actor: &ActorRef<MailboxActor>, capacity: usize) -> Vec<Response
 
 async fn warm_up(actor: &ActorRef<MailboxActor>) {
     actor
-        .call(ReadyTraffic)
+        .call(Traffic)
         .await
         .expect("the benchmark actor starts and remains alive");
 }
@@ -86,14 +79,14 @@ async fn measure_saturated_try_call_full(iters: u64, capacity: usize) -> Duratio
     let queued = fill_mailbox(actor, capacity);
 
     let probe = actor
-        .try_call(ReadyTraffic)
+        .try_call(Traffic)
         .expect_err("a request beyond configured capacity is rejected");
     assert_eq!(probe.kind(), TryCallErrorKind::Full);
 
     let started = Instant::now();
     for _ in 0..iters {
         let error = actor
-            .try_call(ReadyTraffic)
+            .try_call(Traffic)
             .expect_err("the queue remains full throughout the measured batch");
         assert_eq!(error.kind(), TryCallErrorKind::Full);
         black_box(error.into_message());
@@ -108,7 +101,7 @@ async fn measure_saturated_try_call_full(iters: u64, capacity: usize) -> Duratio
     measured
 }
 
-async fn measure_saturated_ready_drain(iters: u64, capacity: usize) -> Duration {
+async fn measure_saturated_drain(iters: u64, capacity: usize) -> Duration {
     let owner = spawn_benchmark_actor(capacity);
     let actor = &owner;
     warm_up(actor).await;
@@ -148,12 +141,12 @@ fn mailbox_saturation(criterion: &mut Criterion) {
 
         group.throughput(Throughput::Elements(capacity as u64));
         group.bench_with_input(
-            BenchmarkId::new("saturated_ready_drain", capacity),
+            BenchmarkId::new("saturated_drain", capacity),
             &capacity,
             |bencher, &capacity| {
                 bencher
                     .to_async(&runtime)
-                    .iter_custom(move |iters| measure_saturated_ready_drain(iters, capacity));
+                    .iter_custom(move |iters| measure_saturated_drain(iters, capacity));
             },
         );
     }

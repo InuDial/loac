@@ -8,7 +8,7 @@
 //! Its lifecycle hooks run serially.
 //! Communication stays inside one process.
 //! Actor tasks are `Send` and run on Tokio.
-//! Messaging, interleaving, and child actor ownership are opt-in.
+//! Messaging and child actor ownership are opt-in.
 //!
 //! # Quick start
 //!
@@ -73,10 +73,10 @@
 //! | --- | --- | --- |
 //! | `mailbox` | Enables typed [`send`](ActorRef::send) and [`call`](ActorRef::call) | Messaging methods are unavailable |
 //! | `mailbox_budget = E` | Limits consecutive message dispatch | Uses `16` with a mailbox |
-//! | `interleaved` | Enables [`Handler`]/[`StreamHandler`] dispatch and [`interleaved`](InterleavedFutureExt::interleaved) replies | The methods are unavailable |
+//! | `interleaved` | Sets concurrent handler capacity | Uses one active handler |
 //! | `children` | Enables [`spawn_child`](ActorScope::spawn_child) | The method is unavailable |
 //!
-//! `mailbox`, `interleaved`, and `children` support three limit profiles.
+//! These options support fixed, dynamic, and unbounded limits.
 //! Those profiles are fixed, dynamic, and unbounded.
 //! Dynamic profiles expose spawn-specific overrides:
 //!
@@ -121,7 +121,7 @@
 //!
 //! | Attribute | Handler trait | Caller receives |
 //! | --- | --- | --- |
-//! | `#[message(reply = Type)]` | [`Handler`] or [`SyncHandler`] | `Type` |
+//! | `#[message(reply = Type)]` | [`Handler`] | `Type` |
 //! | `#[message(stream = Item, reply = Final)]` | [`StreamHandler`] | [`StreamReply`]`<Item, Final>` |
 //!
 //! Omitting the `#[message(...)]` attribute entirely produces a send-only
@@ -130,14 +130,6 @@
 //! caller still receives `Result<M::Reply, CallError>`. Reply and final types
 //! default to `()` when omitted. Stream messages are handled by
 //! [`StreamHandler`].
-//!
-//! For a reply already complete during dispatch, implement [`SyncHandler`]
-//! and attach [`#[loac::sync_handler]`](macro@crate::sync_handler) to the
-//! impl. Prefer `reply` and [`Handler`] for ordinary asynchronous request
-//! handling; prefer [`SyncHandler`] only when the handler returns a value
-//! directly. For explicit reply scheduling, implement [`DispatchHandler`]
-//! directly. See the [`Message`] derive macro documentation for the full
-//! attribute syntax.
 //!
 //! One actor may handle many message types.
 //!
@@ -150,21 +142,13 @@
 //!
 //! # Reply progress
 //!
-//! After dispatch, a handler returns a reply strategy. The strategy controls
-//! how the reply runs beside the rest of the actor.
-//!
-//! | Strategy | Selected by | Actor progress while the reply runs |
-//! | --- | --- | --- |
-//! | ready | [`value.ready()`](ReplyExt::ready) from a [`DispatchHandler`] or [`SyncHandler`] | The reply is already complete during dispatch |
-//! | owned | A bare [`Future`] from a [`DispatchHandler`] | A Tokio task runs it beside all actor work |
-//! | interleaved | [`Handler`], [`StreamHandler`], or [`future.interleaved()`](InterleavedFutureExt::interleaved) | The actor task polls it fairly with other actor work |
-//!
-//! [`Handler`] and [`StreamHandler`] always select interleaved scheduling, so
-//! they require [`HasInterleaving`].
-//! [`DispatchHandler`] selects ready, owned, or interleaved scheduling.
+//! Every handler returns one future.
+//! The actor task owns and polls every handler future.
+//! Mailbox configuration limits active handler futures.
+//! Omitting `interleaved` permits one active handler.
 //! A cx future accesses actor state through [`Cx::with`].
 //! [`Cx::exclusive`] returns a scoped scheduler lease.
-//! Scheduled actor work pauses until that guard drops.
+//! All scheduled actor work pauses until that guard drops.
 //! Graceful `on_shutdown` hooks may still preempt the lease.
 //! See [`reply`] for cancellation, panic, and scheduling details.
 //! See [`scheduling`] for built-in scheduling profiles.
@@ -242,7 +226,6 @@ mod config;
 mod error;
 mod lifecycle;
 mod mailbox;
-mod owned;
 pub mod reply;
 mod runtime;
 pub mod scheduling;
@@ -251,10 +234,7 @@ pub mod transport;
 mod writer;
 
 pub use access::{Cx, ExclusiveGuard};
-pub use actor::{
-    Actor, DispatchHandler, Handler, HasChildren, HasInterleaving, HasMailbox, HasReply, Message,
-    StreamHandler, SyncHandler,
-};
+pub use actor::{Actor, Handler, HasChildren, HasMailbox, HasReply, Message, StreamHandler};
 pub use address::{ActorRef, Recipient, Response};
 pub use config::{
     ActorConfig, DynamicChildrenOptions, DynamicInterleavingOptions, DynamicMailboxOptions,
@@ -267,11 +247,8 @@ pub use error::{
 pub use lifecycle::{
     Child, ChildExit, ChildId, ExitReason, ExitStatus, Shutdown, ShutdownStatus, SubtreeStatus,
 };
-pub use loac_macros::{Message, actor, sync_handler};
-pub use reply::{
-    InterleavedFutureExt, IntoReply, IntoStreamReply, Items, ReplyExt, SingleKind, StreamDispatch,
-    StreamKind, StreamMessage, StreamReply,
-};
+pub use loac_macros::{Message, actor};
+pub use reply::{Items, StreamMessage, StreamReply};
 pub use runtime::{
     ActorOwner, ActorScope, ActorSpawner, SpawnOptions, StopScope, spawn, spawn_with,
 };
@@ -308,11 +285,9 @@ pub mod __private {
 /// remain explicit imports so operational behavior stays visible at call sites.
 pub mod prelude {
     pub use crate::{
-        Actor, ActorScope, ActorSpawner, Cx, DispatchHandler, DynamicChildrenOptions,
-        DynamicInterleavingOptions, DynamicMailboxOptions, Handler, HasChildren, HasInterleaving,
-        HasMailbox, HasReply, InterleavedFutureExt, IntoReply, IntoStreamReply, Items, Message,
-        ReplyExt, SingleKind, StopScope, StreamHandler, StreamKind, StreamMessage, StreamOut,
-        StreamReply, SyncHandler, Writer, actor, reply, sync_handler,
+        Actor, ActorScope, ActorSpawner, Cx, DynamicChildrenOptions, DynamicInterleavingOptions,
+        DynamicMailboxOptions, Handler, HasChildren, HasMailbox, HasReply, Items, Message,
+        StopScope, StreamHandler, StreamMessage, StreamOut, StreamReply, Writer, actor, reply,
     };
 }
 

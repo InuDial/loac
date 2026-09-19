@@ -23,18 +23,11 @@ struct CancellableWork {
     cancellation: CancellationToken,
 }
 
-impl DispatchHandler<CancellableWork> for CancellationActor {
-    fn handle(
-        &mut self,
-        message: CancellableWork,
-        _scope: &mut ActorScope<Self>,
-    ) -> impl loac::IntoReply<Self, CancellableWork> {
-        async move {
-            let _ = message.started.send(());
-            message.cancellation.cancelled().await;
-            WorkCancelled
-        }
-        .interleaved()
+impl Handler<CancellableWork> for CancellationActor {
+    async fn handle(message: CancellableWork, _cx: Cx<'_, Self>) -> WorkCancelled {
+        let _ = message.started.send(());
+        message.cancellation.cancelled().await;
+        WorkCancelled
     }
 }
 
@@ -44,14 +37,9 @@ struct CancelWork {
     dispatched: oneshot::Sender<()>,
 }
 
-impl DispatchHandler<CancelWork> for CancellationActor {
-    fn handle(
-        &mut self,
-        message: CancelWork,
-        _scope: &mut ActorScope<Self>,
-    ) -> impl loac::IntoReply<Self, CancelWork> {
+impl Handler<CancelWork> for CancellationActor {
+    async fn handle(message: CancelWork, _cx: Cx<'_, Self>) {
         let _ = message.dispatched.send(());
-        ().ready()
     }
 }
 
@@ -59,7 +47,7 @@ impl DispatchHandler<CancelWork> for CancellationActor {
 // reply while its only `max_in_flight` slot is occupied. A caller-owned token
 // wakes that reply directly; only then can the queued message dispatch.
 #[tokio::test]
-async fn caller_cancellation_bypasses_a_full_interleaved_lane() {
+async fn caller_cancellation_bypasses_full_handler_capacity() {
     let owner = loac::spawn::<CancellationActor>(());
     let actor = owner.actor_ref();
     let cancellation = CancellationToken::new();

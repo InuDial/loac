@@ -7,8 +7,8 @@ use std::sync::{
 use std::task::Poll;
 
 use loac::{
-    Actor, ActorScope, CallError, Child, ChildExit, DispatchHandler, ExitReason,
-    InterleavedFutureExt, Message, ReplyExt, Shutdown, SubtreeStatus, actor,
+    Actor, ActorScope, CallError, Child, ChildExit, Cx, ExitReason, Handler, Message, Shutdown,
+    SubtreeStatus, actor,
 };
 use tokio::sync::{mpsc, oneshot};
 
@@ -32,14 +32,11 @@ impl Actor for ChildActor {
 #[message(reply = ())]
 struct StopSelf;
 
-impl DispatchHandler<StopSelf> for ChildActor {
-    fn handle(
-        &mut self,
-        _message: StopSelf,
-        scope: &mut ActorScope<'_, Self>,
-    ) -> impl loac::IntoReply<Self, StopSelf> {
-        let _ = scope.request_shutdown(Shutdown::Stop);
-        ().ready()
+impl Handler<StopSelf> for ChildActor {
+    async fn handle(_message: StopSelf, mut cx: Cx<'_, Self>) {
+        cx.with(|_, scope| {
+            let _ = scope.request_shutdown(Shutdown::Stop);
+        });
     }
 }
 
@@ -47,15 +44,9 @@ impl DispatchHandler<StopSelf> for ChildActor {
 #[message(reply = ())]
 struct PanicSelf;
 
-impl DispatchHandler<PanicSelf> for ChildActor {
-    fn handle(
-        &mut self,
-        _message: PanicSelf,
-        _scope: &mut ActorScope<'_, Self>,
-    ) -> impl loac::IntoReply<Self, PanicSelf> {
+impl Handler<PanicSelf> for ChildActor {
+    async fn handle(_message: PanicSelf, _cx: Cx<'_, Self>) {
         panic!("intentional child panic");
-        #[allow(unreachable_code)]
-        ().ready()
     }
 }
 
@@ -98,13 +89,9 @@ impl Actor for Supervisor {
 #[message(reply = usize)]
 struct Observed;
 
-impl DispatchHandler<Observed> for Supervisor {
-    fn handle(
-        &mut self,
-        _message: Observed,
-        _scope: &mut ActorScope<'_, Self>,
-    ) -> impl loac::IntoReply<Self, Observed> {
-        self.observed.load(Ordering::SeqCst).ready()
+impl Handler<Observed> for Supervisor {
+    async fn handle(_message: Observed, mut cx: Cx<'_, Self>) -> usize {
+        cx.with(|actor, _| actor.observed.load(Ordering::SeqCst))
     }
 }
 
@@ -112,12 +99,8 @@ impl DispatchHandler<Observed> for Supervisor {
 #[message(reply = ())]
 struct ChildExitBarrier;
 
-impl DispatchHandler<ChildExitBarrier> for Supervisor {
-    fn handle(
-        &mut self,
-        _message: ChildExitBarrier,
-        _scope: &mut ActorScope<'_, Self>,
-    ) -> impl loac::IntoReply<Self, ChildExitBarrier> {
+impl Handler<ChildExitBarrier> for Supervisor {
+    async fn handle(_message: ChildExitBarrier, _cx: Cx<'_, Self>) {
         let mut yielded = false;
         std::future::poll_fn(move |task| {
             if yielded {
@@ -128,7 +111,7 @@ impl DispatchHandler<ChildExitBarrier> for Supervisor {
                 Poll::Pending
             }
         })
-        .interleaved()
+        .await
     }
 }
 

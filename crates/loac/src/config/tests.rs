@@ -4,7 +4,7 @@ use std::{
 };
 
 use crate::{
-    Actor, ActorScope, HasChildren, HasInterleaving, MessageConfig, actor, scheduling, supervision,
+    Actor, ActorScope, HasChildren, MessageConfig, actor, scheduling, supervision,
     transport::{MessageSender, TryReserveError},
 };
 
@@ -100,7 +100,6 @@ where
 }
 
 fn assert_send_sync_static<T: Send + Sync + 'static>() {}
-fn assert_has_interleaving<A: HasInterleaving>() {}
 fn assert_has_children<A: HasChildren>() {}
 
 trait Same<T> {}
@@ -136,10 +135,6 @@ fn generated_configs_use_actor_specific_options() {
     let _: ActorOptions<Unbounded, UnboundedMailbox, UnboundedInterleaving, UnboundedChildren> =
         Default::default();
 
-    assert_has_interleaving::<Fixed>();
-    assert_has_interleaving::<Dynamic>();
-    assert_has_interleaving::<CustomDynamic>();
-    assert_has_interleaving::<Unbounded>();
     assert_has_children::<Fixed>();
     assert_has_children::<DefaultChildren>();
     assert_has_children::<Dynamic>();

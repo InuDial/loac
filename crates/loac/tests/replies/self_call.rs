@@ -15,43 +15,25 @@ impl Actor for SelfCaller {
 #[message(reply = u8)]
 struct Echo(u8);
 
-impl DispatchHandler<Echo> for SelfCaller {
-    fn handle(
-        &mut self,
-        message: Echo,
-        _scope: &mut ActorScope<Self>,
-    ) -> impl loac::IntoReply<Self, Echo> {
-        message.0.ready()
+impl Handler<Echo> for SelfCaller {
+    async fn handle(message: Echo, _cx: Cx<'_, Self>) -> u8 {
+        message.0
     }
 }
 
 #[derive(Message)]
 #[message(reply = u8)]
-struct OwnedSelfCall(u8);
-
-impl DispatchHandler<OwnedSelfCall> for SelfCaller {
-    fn handle(
-        &mut self,
-        message: OwnedSelfCall,
-        scope: &mut ActorScope<Self>,
-    ) -> impl loac::IntoReply<Self, OwnedSelfCall> {
-        let response = scope.try_call(Echo(message.0)).unwrap();
-        async move { response.await.unwrap() }
-    }
+struct SelfCall {
+    value: u8,
+    entered: Option<oneshot::Sender<()>>,
 }
 
-#[derive(Message)]
-#[message(reply = u8)]
-struct InterleavedSelfCall(u8);
-
-impl DispatchHandler<InterleavedSelfCall> for SelfCaller {
-    fn handle(
-        &mut self,
-        message: InterleavedSelfCall,
-        scope: &mut ActorScope<Self>,
-    ) -> impl loac::IntoReply<Self, InterleavedSelfCall> {
-        let response = scope.try_call(Echo(message.0)).unwrap();
-        async move { response.await.unwrap() }.interleaved()
+impl Handler<SelfCall> for SelfCaller {
+    async fn handle(message: SelfCall, cx: Cx<'_, Self>) -> u8 {
+        if let Some(entered) = message.entered {
+            let _ = entered.send(());
+        }
+        cx.try_call(Echo(message.value)).unwrap().await.unwrap()
     }
 }
 
@@ -80,8 +62,22 @@ async fn nonexclusive_self_calls_progress_but_exclusive_self_call_waits() {
     let mut owner = spawn_with::<SelfCaller>((), options);
     let actor = owner.actor_ref();
 
-    assert_eq!(watchdog(actor.call(OwnedSelfCall(3))).await, Ok(3));
-    assert_eq!(watchdog(actor.call(InterleavedSelfCall(4))).await, Ok(4));
+    assert_eq!(
+        watchdog(actor.call(SelfCall {
+            value: 3,
+            entered: None,
+        }))
+        .await,
+        Ok(3)
+    );
+    assert_eq!(
+        watchdog(actor.call(SelfCall {
+            value: 4,
+            entered: None,
+        }))
+        .await,
+        Ok(4)
+    );
 
     let (observed_tx, observed_rx) = oneshot::channel();
     let (polled_tx, polled_rx) = oneshot::channel();
@@ -110,17 +106,27 @@ async fn nonexclusive_self_calls_progress_but_exclusive_self_call_waits() {
 }
 
 #[tokio::test]
-async fn owned_self_call_progresses_with_one_interleaved_slot() {
-    // Owned tasks consume no interleaved slot.
-    // The inner call can use the configured slot.
+async fn self_call_waits_when_it_owns_the_only_reply_slot() {
     let options =
         SpawnOptions::<SelfCaller>::default().with_max_in_flight(NonZeroUsize::new(1).unwrap());
-    let owner = spawn_with::<SelfCaller>((), options);
+    let mut owner = spawn_with::<SelfCaller>((), options);
     let actor = owner.actor_ref();
+    let (entered_tx, entered_rx) = oneshot::channel();
+    let response = actor
+        .try_call(SelfCall {
+            value: 1,
+            entered: Some(entered_tx),
+        })
+        .unwrap();
 
-    assert_eq!(watchdog(actor.call(OwnedSelfCall(1))).await, Ok(1));
+    watchdog(entered_rx).await.unwrap();
     assert_eq!(
-        watchdog(owner.shutdown(Shutdown::Stop)).await.reason(),
-        ExitReason::Stopped
+        owner.request_shutdown(Shutdown::Kill),
+        loac::ShutdownStatus::Requested
     );
+    assert_eq!(
+        watchdog(response).await,
+        Err(CallError::DuringDispatch(ExitReason::Killed))
+    );
+    assert_eq!(watchdog(owner.wait()).await.reason(), ExitReason::Killed);
 }

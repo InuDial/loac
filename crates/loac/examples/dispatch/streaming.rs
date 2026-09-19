@@ -21,25 +21,17 @@ impl Actor for Provider {
 #[message(stream = u8)]
 struct Subscribe;
 
-impl DispatchHandler<Subscribe, StreamKind> for Provider {
-    fn handle(
-        &mut self,
-        _message: Subscribe,
-        _scope: &mut ActorScope<Self>,
-    ) -> impl loac::IntoReply<Self, Subscribe> {
-        let (item_tx, item_rx) = tokio::sync::mpsc::channel::<u8>(8);
-        let (final_tx, final_rx) = tokio::sync::oneshot::channel::<()>();
-        let strategy = async move {
-            let mut out = item_tx;
-            for i in 0..4 {
-                // A failed write means the caller dropped its `StreamReply`.
-                if out.write(i).await.is_err() {
-                    break;
-                }
-                tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+impl StreamHandler<Subscribe> for Provider {
+    async fn handle<'a, W>(_message: Subscribe, mut out: StreamOut<'a, W>, _cx: Cx<'a, Self>)
+    where
+        W: Writer<u8> + Send + 'a,
+    {
+        for item in 0..4 {
+            if out.write(item).await.is_err() {
+                break;
             }
-        };
-        loac::StreamDispatch::new(strategy, item_rx, final_tx, final_rx)
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        }
     }
 }
 

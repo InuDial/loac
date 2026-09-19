@@ -1,6 +1,6 @@
 use std::sync::{Arc, Mutex};
 
-use loac::{Actor, ActorScope, DispatchHandler, Message, ReplyExt, Shutdown, Writer, actor};
+use loac::{Actor, ActorScope, Cx, Handler, Message, Shutdown, Writer, actor};
 
 struct Collector {
     seen: Arc<Mutex<Vec<u8>>>,
@@ -19,14 +19,9 @@ impl Actor for Collector {
 #[message(reply = ())]
 struct Token(u8);
 
-impl DispatchHandler<Token> for Collector {
-    fn handle(
-        &mut self,
-        message: Token,
-        _scope: &mut ActorScope<'_, Self>,
-    ) -> impl loac::IntoReply<Self, Token> {
-        self.seen.lock().unwrap().push(message.0);
-        ().ready()
+impl Handler<Token> for Collector {
+    async fn handle(message: Token, mut cx: Cx<'_, Self>) {
+        cx.with(|actor, _| actor.seen.lock().unwrap().push(message.0));
     }
 }
 

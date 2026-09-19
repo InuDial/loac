@@ -16,7 +16,6 @@ use crate::{
     HasChildren, Shutdown, ShutdownStatus, SubtreeStatus,
     config::SupervisionConfig,
     mailbox::{ActorInbox, ActorInner, Control, HookEntryPermit, Mode},
-    owned::OwnedTasks,
     scheduling::{ActorScheduler, RuntimeScheduler, SchedulerTurn, TurnContext},
     supervision::{
         ChildSpawner, ChildSupervisor,
@@ -61,7 +60,7 @@ pub(crate) use task::{
 ///
 /// Dynamic mailbox options expose
 /// [`with_mailbox_capacity`](crate::DynamicMailboxOptions::with_mailbox_capacity).
-/// Dynamic interleaving options expose
+/// Dynamic handler-concurrency options expose
 /// [`with_max_in_flight`](crate::DynamicInterleavingOptions::with_max_in_flight).
 /// Dynamic supervision options expose
 /// [`with_max_children`](crate::DynamicChildrenOptions::with_max_children).

@@ -2,7 +2,7 @@ use super::*;
 
 struct PanicActor;
 
-#[actor(mailbox)]
+#[actor(mailbox, interleaved = 2)]
 impl Actor for PanicActor {
     type SpawnArgs = ();
 
@@ -40,16 +40,10 @@ struct PendingSibling {
     release: oneshot::Receiver<()>,
 }
 
-impl DispatchHandler<PendingSibling> for PanicActor {
-    fn handle(
-        &mut self,
-        message: PendingSibling,
-        _scope: &mut ActorScope<Self>,
-    ) -> impl loac::IntoReply<Self, PendingSibling> {
-        async move {
-            let _ = message.entered.send(());
-            let _ = message.release.await;
-        }
+impl Handler<PendingSibling> for PanicActor {
+    async fn handle(message: PendingSibling, _cx: Cx<'_, Self>) {
+        let _ = message.entered.send(());
+        let _ = message.release.await;
     }
 }
 
@@ -78,27 +72,17 @@ impl Drop for PanicAfterReady {
     }
 }
 
-impl DispatchHandler<PanicAfterReady> for PanicActor {
-    fn handle(
-        &mut self,
-        message: PanicAfterReady,
-        _scope: &mut ActorScope<Self>,
-    ) -> impl loac::IntoReply<Self, PanicAfterReady> {
+impl Handler<PanicAfterReady> for PanicActor {
+    fn handle(message: PanicAfterReady, _cx: Cx<'_, Self>) -> impl Future<Output = ()> + Send + '_ {
         message
     }
 }
 
-impl DispatchHandler<PanicReply> for PanicActor {
-    fn handle(
-        &mut self,
-        message: PanicReply,
-        _scope: &mut ActorScope<Self>,
-    ) -> impl loac::IntoReply<Self, PanicReply> {
-        async move {
-            let _ = message.entered.send(());
-            let _ = message.release.await;
-            panic!("intentional reply panic");
-        }
+impl Handler<PanicReply> for PanicActor {
+    async fn handle(message: PanicReply, _cx: Cx<'_, Self>) {
+        let _ = message.entered.send(());
+        let _ = message.release.await;
+        panic!("intentional reply panic");
     }
 }
 
@@ -153,7 +137,7 @@ async fn panic_after_lease_acquisition_fails_the_actor() {
 // Reply completion consumes its lifecycle gate first.
 // A later future Drop panic must still fail the actor.
 #[tokio::test]
-async fn owned_task_panic_after_reply_completion_still_fails_the_actor() {
+async fn future_drop_panic_after_reply_completion_still_fails_the_actor() {
     let mut owner = loac::spawn::<PanicActor>(());
     let actor = owner.actor_ref();
 

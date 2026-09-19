@@ -66,23 +66,19 @@ fn truncated_reply_sweep_yields_before_ready_mailbox() {
     enqueue_test_envelope(&inner, CountEnvelope(Arc::clone(&mailbox_dispatches)));
 
     let scope = scope_state(&inner);
-    let owned = OwnedTasks::new(Arc::clone(&inner));
     let options = <TestActor as ActorConfig>::Options::default()
         .with_max_in_flight(NonZeroUsize::new(REPLIES).unwrap());
     let (_, _, mut scheduler) = TestActor::open(&options);
     for _ in 0..REPLIES {
         let replies_polled = Arc::clone(&replies_polled);
-        scheduler.__push_interleaved(
-            Seal,
-            ScheduledFuture::test(async move {
-                replies_polled.fetch_add(1, Ordering::SeqCst);
-            }),
-        );
+        scheduler.state().push(ScheduledFuture::test(async move {
+            replies_polled.fetch_add(1, Ordering::SeqCst);
+        }));
     }
     let actor_ref = actor_ref(&inner);
     let mut access = ActorAccess::new(actor_ref, TestActor, scope);
     // Start at replies. The old path continued to the ready mailbox.
-    scheduler.state().cursor = InterleavedLane::Interleaved;
+    scheduler.state().cursor = ReplyLane::Reply;
     let mut task = Context::from_waker(Waker::noop());
 
     {
@@ -90,7 +86,6 @@ fn truncated_reply_sweep_yields_before_ready_mailbox() {
             &mut access,
             &mut inbox,
             &inner,
-            &owned,
             &mut scheduler,
             true,
             Mode::Running,
@@ -101,72 +96,8 @@ fn truncated_reply_sweep_yields_before_ready_mailbox() {
     let replies_polled = replies_polled.load(Ordering::SeqCst);
     assert!(0 < replies_polled && replies_polled < REPLIES);
     assert_eq!(mailbox_dispatches.load(Ordering::SeqCst), 0);
-    assert!(scheduler.state().has_interleaved());
-    assert_eq!(scheduler.state().cursor, InterleavedLane::ChildExit);
-}
-
-// Drain must observe lifecycle and child work before completion.
-// Otherwise a ready barrier can skip accepted supervision events.
-#[tokio::test]
-async fn drain_priority_precedes_owned_completion() {
-    let (inner, mut inbox) = test_actor_inner(1);
-    let control = &inner.control;
-    assert_eq!(control.request(Shutdown::Drain), ShutdownStatus::Requested);
-
-    let scope = scope_state(&inner);
-    let child = ChildId::invalid_for_test();
-    scope.children.publish(ChildExit::new(
-        child,
-        ExitStatus::new(ExitReason::Stopped, SubtreeStatus::Terminated),
-    ));
-
-    let owned = OwnedTasks::new(Arc::clone(&inner));
-    owned.close();
-    let options =
-        <TestActor as ActorConfig>::Options::default().with_max_in_flight(NonZeroUsize::MIN);
-    let (_, _, mut scheduler) = TestActor::open(&options);
-    let actor_ref = actor_ref(&inner);
-    let mut access = ActorAccess::new(actor_ref, TestActor, scope);
-
-    assert!(matches!(
-        drain_turn(
-            &mut access,
-            &mut inbox,
-            &inner,
-            &owned,
-            &mut scheduler,
-            false,
-        )
-        .await,
-        DrainTurn::Scheduled(SchedulerTurn::LifecycleHint)
-    ));
-
-    let turn = drain_turn(
-        &mut access,
-        &mut inbox,
-        &inner,
-        &owned,
-        &mut scheduler,
-        false,
-    )
-    .await;
-    let DrainTurn::Scheduled(SchedulerTurn::Child(event)) = turn else {
-        panic!("ready child exit must precede owned completion");
-    };
-    assert_eq!(event.child(), &child);
-
-    assert!(matches!(
-        drain_turn(
-            &mut access,
-            &mut inbox,
-            &inner,
-            &owned,
-            &mut scheduler,
-            false,
-        )
-        .await,
-        DrainTurn::RepliesFinished
-    ));
+    assert!(scheduler.state().has_replies());
+    assert_eq!(scheduler.state().cursor, ReplyLane::ChildExit);
 }
 
 #[tokio::test]
@@ -195,26 +126,20 @@ async fn child_kill_commits_before_actor_work_is_dropped() {
 
     let mut scope = scope_state(&inner);
     scope.children.insert_ref(&child_ref);
-    let owned = OwnedTasks::new(Arc::clone(&inner));
     let options =
         <TestActor as ActorConfig>::Options::default().with_max_in_flight(NonZeroUsize::MIN);
     let (_, _, mut scheduler) = TestActor::open(&options);
     let actor_ref = actor_ref(&inner);
     let mut access = ActorAccess::new(actor_ref, TestActor, scope);
-    owned.spawn(ChildKillDropProbe {
-        child: child_inner,
-        observed_kill: Arc::clone(&active_observed_kill),
-    });
+    scheduler
+        .state()
+        .push(ScheduledFuture::test(ChildKillDropProbe {
+            child: child_inner,
+            observed_kill: Arc::clone(&active_observed_kill),
+        }));
 
     assert_eq!(
-        kill_actor(
-            &mut access,
-            &mut inbox,
-            &inner.control,
-            &owned,
-            &mut scheduler,
-        )
-        .await,
+        kill_actor(&mut access, &mut inbox, &inner.control, &mut scheduler,).await,
         ExitStatus::new(ExitReason::Killed, SubtreeStatus::Terminated)
     );
     assert!(active_observed_kill.load(Ordering::SeqCst));

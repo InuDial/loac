@@ -1,13 +1,11 @@
 use std::future::Future;
 
-use tokio::sync::{mpsc, oneshot};
-
 use crate::{
     ActorScope, ChildExit, ExitReason, Shutdown, StopScope, StreamOut, Writer,
     access::Cx,
     config::SupervisionConfig,
-    reply::{CxReply, CxStream, IntoReply, SingleKind, StreamDispatch, StreamKind, StreamMessage},
-    scheduling::{InterleavedScheduler, SchedulerProfile},
+    reply::StreamMessage,
+    scheduling::SchedulerProfile,
     transport::{MessageConfig, MessageInbox, MessageSender, RuntimeInbox},
 };
 
@@ -19,9 +17,8 @@ use crate::{
 /// [`SupervisionConfig`] supplies child actor ownership.
 ///
 /// Initialization and lifecycle hooks run in the serial actor context.
-/// While they are pending, handlers and actor-aware replies pause.
+/// While they are pending, handler futures pause.
 /// Another hook cannot enter for this actor.
-/// Owned replies continue in independent Tokio tasks.
 /// Stop and Drain wait for initialization and entered hooks.
 /// Kill may cancel current serial work between polls.
 /// Kill and executor teardown cannot interrupt a poll or user `Drop`.
@@ -249,40 +246,12 @@ where
 {
 }
 
-/// An actor configured to run interleaved replies.
-///
-/// [`#[actor(mailbox, interleaved)]`](macro@crate::actor) selects this capability.
-/// Fixed, dynamic, and unbounded limits all qualify.
-/// This capability also requires [`HasMailbox`].
-/// It exposes [`InterleavedFutureExt::interleaved`](crate::InterleavedFutureExt::interleaved).
-/// The selected scheduler provides this capability automatically.
-/// Do not implement this trait directly.
-#[diagnostic::on_unimplemented(
-    message = "`{Self}` cannot run interleaved replies",
-    label = "interleaved replies require mailbox and interleaving capabilities"
-)]
-pub trait HasInterleaving:
-    HasMailbox + MessageConfig<Scheduler: InterleavedScheduler<Self>>
-{
-}
-
-// The active scheduler profile proves this capability.
-#[doc(hidden)]
-#[diagnostic::do_not_recommend]
-impl<A> HasInterleaving for A
-where
-    A: HasMailbox,
-    A::Scheduler: InterleavedScheduler<A>,
-{
-}
-
 /// A typed request accepted by an actor.
 ///
 /// Declare one with `#[derive(Message)]`. The derive supports two shapes:
 ///
-/// - `#[message(reply = Type)]` makes an ordinary callable message handled by
-///   [`crate::Handler`] or [`crate::SyncHandler`] with
-///   [`#[loac::sync_handler]`](macro@crate::sync_handler).
+/// - `#[message(reply = Type)]` makes an ordinary callable message.
+///   [`crate::Handler`] handles it.
 /// - `#[message(stream = Item, reply = Final)]` makes a stream message handled
 ///   by [`crate::StreamHandler`].
 ///
@@ -291,8 +260,6 @@ where
 /// callable with [`crate::ActorRef::call`]. Only a message derived without a
 /// `#[message(...)]` attribute is send-only. The `stream` shape makes
 /// [`crate::ActorRef::call`] return [`crate::reply::StreamReply`].
-/// Explicit reply scheduling is still available by implementing
-/// [`DispatchHandler`] directly.
 /// See the derive macro documentation for the full attribute syntax.
 pub trait Message: Send + 'static {
     /// The typed value eventually returned to the caller.
@@ -307,7 +274,7 @@ pub trait Message: Send + 'static {
     /// Ordinary messages use [`reply::SingleKind`](crate::reply::SingleKind).
     /// Messages derived with `#[message(stream = ...)]` use
     /// [`reply::StreamKind`](crate::reply::StreamKind). The runtime reads this
-    /// kind when selecting the [`DispatchHandler`] implementation.
+    /// kind when selecting its handler implementation.
     type Kind: crate::reply::ReplyKind;
 }
 
@@ -320,58 +287,10 @@ pub trait Message: Send + 'static {
 /// [`crate::ActorRef::try_call`] are unavailable for it.
 pub trait HasReply: Message {}
 
-/// Dispatch shape for one message type.
-///
-/// The runtime selects an implementation from the message's [`Message::Kind`]
-/// after pairing a message with its reply channel. Public handlers are adapted
-/// to it through blanket impls:
-///
-/// - [`Handler`] adapts [`SingleKind`] messages.
-/// - [`StreamHandler`] adapts [`StreamKind`] stream messages.
-///
-/// [`SyncHandler`] is not blanket-adapted; attach
-/// [`#[loac::sync_handler]`](macro@crate::sync_handler) to the impl so the
-/// macro can emit a concrete ready dispatch for that message type.
-///
-/// Implement this trait directly as the advanced escape hatch when a handler
-/// must choose among [`IntoReply`] strategies such as
-/// [`ReplyExt::ready`](crate::ReplyExt::ready),
-/// a bare future, or [`Either`](crate::reply::Either).
-/// Prefer [`Handler`] when an `async fn`
-/// with [`Cx`] is enough, and [`SyncHandler`] when the reply is already
-/// complete.
-pub trait DispatchHandler<M: Message, K: crate::reply::ReplyKind = SingleKind>: HasMailbox {
-    /// Synchronously starts handling `message` and chooses its reply semantics.
-    ///
-    /// The runtime calls this method after the request commits to dispatch.
-    /// Configured interleaved capacity must also permit dispatch.
-    /// An active scheduler lease may block actor work.
-    /// The function runs to completion inside one actor
-    /// turn: Kill cannot interrupt it, and abandoning the caller's response does
-    /// not roll back effects that occur here. A panic is contained, fails this
-    /// actor, and cancels its other active and queued work.
-    ///
-    /// The `K` parameter selects the reply channel shape. [`SingleKind`] is the
-    /// default for ordinary messages. [`StreamKind`] is used by stream messages
-    /// and is selected automatically when the message implements
-    /// [`StreamMessage`](crate::reply::StreamMessage).
-    ///
-    /// The result remains tied to this dispatch invocation.
-    /// The runtime consumes it before releasing either borrow.
-    /// Asynchronous strategies must still own their ordinary data.
-    /// Use [`reply::Either`](crate::reply::Either) for runtime branching.
-    fn handle<'a>(
-        &'a mut self,
-        message: M,
-        scope: &'a mut ActorScope<'_, Self>,
-    ) -> impl IntoReply<Self, M> + 'a;
-}
-
 /// Handles one message with an actor-access `cx` future.
 ///
 /// This is the primary handler trait. The runtime polls the returned future on
-/// the actor's interleaved lane, so dispatch through this trait requires
-/// [`HasInterleaving`]. Inside the future, use [`Cx::with`] for temporary
+/// the actor's reply queue. Inside the future, use [`Cx::with`] for temporary
 /// actor and scope access; pass `_` for the borrow you do not need. `with`
 /// returns before any `await`; neither the actor nor scope borrow can escape
 /// its call.
@@ -403,44 +322,13 @@ pub trait DispatchHandler<M: Message, K: crate::reply::ReplyKind = SingleKind>: 
 ///     }
 /// }
 /// ```
-pub trait Handler<M: Message>: HasInterleaving {
+pub trait Handler<M: Message>: HasMailbox {
     /// Starts handling `message` and returns the reply-producing future.
     ///
-    /// The runtime invokes this method during its first scheduled poll.
-    /// The actor's interleaved lane polls this future.
+    /// The runtime constructs this future during dispatch.
+    /// The actor task polls this future.
     /// `cx` provides temporary synchronous actor and scope access.
     fn handle(message: M, cx: Cx<'_, Self>) -> impl Future<Output = M::Reply> + Send + '_;
-}
-
-impl<A, M> DispatchHandler<M, SingleKind> for A
-where
-    A: Handler<M> + HasInterleaving,
-    M: Message<Kind = SingleKind>,
-{
-    fn handle<'a>(
-        &'a mut self,
-        message: M,
-        scope: &'a mut ActorScope<'_, Self>,
-    ) -> impl IntoReply<Self, M> + 'a {
-        let (cx, lease) = Cx::new(self, scope);
-        // Dispatch still owns its exclusive actor borrow.
-        // Defer user construction until the first scheduled poll.
-        let future = async move { <A as Handler<M>>::handle(message, cx).await };
-        CxReply::new(future, lease)
-    }
-}
-
-/// Handles one message synchronously during dispatch.
-///
-/// Implement this trait when the reply value is already complete by the time
-/// `handle` returns. Attach the [`#[loac::sync_handler]`](macro@crate::sync_handler)
-/// attribute to the impl so the runtime can dispatch it; the macro emits the
-/// ready reply without requiring an interleaving lane.
-///
-/// Use this shape with `#[message(reply = Type)]`.
-pub trait SyncHandler<M: Message>: HasMailbox {
-    /// Produces the completed reply value during synchronous dispatch.
-    fn handle(&mut self, message: M, scope: &mut ActorScope<'_, Self>) -> M::Reply;
 }
 
 /// Handles a stream message with an actor-access `cx` future.
@@ -450,18 +338,17 @@ pub trait SyncHandler<M: Message>: HasMailbox {
 /// and produces the final value; the caller receives the
 /// [`StreamReply`](crate::reply::StreamReply) handle.
 ///
-/// The runtime polls the returned future on the actor's interleaved lane, so
-/// dispatch through this trait requires [`HasInterleaving`].
+/// The runtime polls the returned future on the actor task.
 /// `out` is the runtime-created item writer wrapped in [`StreamOut`]. The
 /// wrapper ties the writer to the handler future's borrow, so it cannot be
 /// moved into a `'static` task; dropping it closes the caller's item stream.
-pub trait StreamHandler<M>: HasInterleaving
+pub trait StreamHandler<M>: HasMailbox
 where
     M: StreamMessage,
 {
     /// Starts producing stream items and returns the final reply future.
     ///
-    /// The runtime invokes this method during its first scheduled poll.
+    /// The runtime constructs this future during dispatch.
     /// `cx` provides temporary synchronous actor and scope access.
     fn handle<'a, W>(
         message: M,
@@ -470,26 +357,4 @@ where
     ) -> impl Future<Output = M::Final> + Send + 'a
     where
         W: Writer<M::Item> + Send + 'a;
-}
-
-impl<A, M> DispatchHandler<M, StreamKind> for A
-where
-    A: StreamHandler<M> + HasInterleaving,
-    M: StreamMessage,
-{
-    fn handle<'a>(
-        &'a mut self,
-        message: M,
-        scope: &'a mut ActorScope<'_, Self>,
-    ) -> impl IntoReply<Self, M> + 'a {
-        let (item_tx, item_rx) = mpsc::channel::<M::Item>(8);
-        let (final_tx, final_rx) = oneshot::channel::<M::Final>();
-        let (cx, lease) = Cx::new(self, scope);
-        let out = StreamOut::new(item_tx);
-        // Dispatch still owns its exclusive actor borrow.
-        // Defer user construction until the first scheduled poll.
-        let future = async move { <A as StreamHandler<M>>::handle(message, out, cx).await };
-        let strategy = CxStream::new(future, lease);
-        StreamDispatch::new(strategy, item_rx, final_tx, final_rx)
-    }
 }

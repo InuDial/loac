@@ -17,6 +17,8 @@ Scheduled futures cannot outlive their actor storage.
 
 - The actor task owns every mutable cell access.
 - It polls only one actor operation simultaneously.
+- Dispatch creates `Cx` from pinned storage directly.
+- Dispatch never creates a mutable actor reference.
 - [`Cx::with`](src/access.rs) creates temporary mutable borrows.
 - Its higher-ranked closure prevents those borrows escaping.
 - Actor and scope state occupy separate `UnsafeCell` fields.
@@ -26,12 +28,12 @@ No safe mutable reference survives `Cx::with`.
 
 ## Lifetime erasure
 
-`Cx::new` returns `Cx` and `ScopedLease` together.
+`Cx::new` borrows `ActorAccess`, not its actor.
+It returns `Cx` and `ScopedLease` together.
 Both values carry the same dispatch lifetime.
-`CxReply` and `CxStream` retain that witness.
+The handler future retains that witness.
 
 [`ScheduledFuture::scoped`](src/scheduling.rs) performs one lifetime transmute.
-It boxes the completed scheduling wrapper first.
 The scheduler then owns both future and lease.
 The erased lifetime never enters a public type.
 
@@ -42,7 +44,7 @@ Scheduler teardown keeps actor storage alive during destruction.
 
 | Event | Resulting invariant |
 | --- | --- |
-| Dispatch queues work | Handler construction remains deferred |
+| Dispatch queues work | The scheduler owns future and lease |
 | Poll returns `Pending` | No temporary actor borrow remains |
 | Poll acquires a lease | That item remains at the queue front |
 | Leased poll returns `Pending` | Other scheduled actor work pauses |

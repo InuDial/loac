@@ -1,19 +1,12 @@
-//! Steady-state end-to-end allocation counts for reply strategies.
+//! Steady-state allocation counts for scheduled replies.
 //!
-//! Measurement includes mailbox admission, envelopes, response transport, and dispatch.
-//! It also includes Tokio-task or actor-scheduler ownership.
+//! Measurement includes admission, response transport, and scheduling.
 //! Runtime creation and actor spawn stay outside each region.
-//! Warmup, reporting, and shutdown also stay outside.
-//! Counts are diagnostics, not compatibility thresholds.
-//! The ready row is the common transport baseline.
-//! Other rows do not subtract it.
-//! The allocator counter is thread-local.
-//! A current-thread runtime keeps measured allocations on one thread.
 
 use std::hint::black_box;
 
 use allocation_counter::{AllocationInfo, measure};
-use loac::{ActorRef, DispatchHandler, ReplyExt, prelude::*};
+use loac::{ActorRef, prelude::*};
 
 const WARMUP_CALLS: usize = 64;
 const MEASURED_CALLS: usize = 10_000;
@@ -31,45 +24,11 @@ impl Actor for ReplyActor {
 
 #[derive(Message)]
 #[message(reply = u64)]
-struct Ready;
+struct Reply;
 
-impl DispatchHandler<Ready> for ReplyActor {
-    fn handle(
-        &mut self,
-        _message: Ready,
-        _scope: &mut ActorScope<Self>,
-    ) -> impl IntoReply<Self, Ready> {
-        1.ready()
-    }
-}
-
-#[derive(Message)]
-#[message(reply = u64)]
-struct Owned;
-
-impl DispatchHandler<Owned> for ReplyActor {
-    fn handle(
-        &mut self,
-        _message: Owned,
-        _scope: &mut ActorScope<Self>,
-    ) -> impl IntoReply<Self, Owned> {
-        // All asynchronous modes share this concrete base future.
-        // Counts therefore isolate wrappers and execution ownership.
-        std::future::ready(1)
-    }
-}
-
-#[derive(Message)]
-#[message(reply = u64)]
-struct Interleaved;
-
-impl DispatchHandler<Interleaved> for ReplyActor {
-    fn handle(
-        &mut self,
-        _message: Interleaved,
-        _scope: &mut ActorScope<Self>,
-    ) -> impl IntoReply<Self, Interleaved> {
-        std::future::ready(1).interleaved()
+impl Handler<Reply> for ReplyActor {
+    async fn handle(_message: Reply, _cx: Cx<'_, Self>) -> u64 {
+        1
     }
 }
 
@@ -84,36 +43,24 @@ impl Handler<Exclusive> for ReplyActor {
     }
 }
 
-fn run_calls<M>(
-    runtime: &tokio::runtime::Runtime,
-    actor: &ActorRef<ReplyActor>,
-    calls: usize,
-    mut message: impl FnMut() -> M,
-) where
-    M: Message + HasReply,
-    ReplyActor: DispatchHandler<M, M::Kind>,
-{
+fn run_replies(runtime: &tokio::runtime::Runtime, actor: &ActorRef<ReplyActor>, calls: usize) {
     runtime.block_on(async {
         for _ in 0..calls {
-            let reply = actor
-                .call(message())
-                .await
-                .expect("the benchmark actor stays alive");
-            black_box(reply);
+            black_box(actor.call(Reply).await.expect("the actor stays alive"));
         }
     });
 }
 
-fn measure_calls<M>(
-    runtime: &tokio::runtime::Runtime,
-    actor: &ActorRef<ReplyActor>,
-    message: impl FnMut() -> M,
-) -> AllocationInfo
-where
-    M: Message + HasReply,
-    ReplyActor: DispatchHandler<M, M::Kind>,
-{
-    measure(|| run_calls(runtime, actor, MEASURED_CALLS, message))
+fn run_exclusive(runtime: &tokio::runtime::Runtime, actor: &ActorRef<ReplyActor>, calls: usize) {
+    runtime.block_on(async {
+        for _ in 0..calls {
+            black_box(actor.call(Exclusive).await.expect("the actor stays alive"));
+        }
+    });
+}
+
+fn measure_calls(run: impl FnOnce()) -> AllocationInfo {
+    measure(run)
 }
 
 fn main() {
@@ -121,21 +68,20 @@ fn main() {
         .build()
         .expect("the benchmark runtime builds");
     let owner = runtime.block_on(async { loac::spawn::<ReplyActor>(()) });
-    let actor = &owner;
+    let actor = owner.actor_ref();
 
-    run_calls(&runtime, actor, WARMUP_CALLS, || Ready);
-    run_calls(&runtime, actor, WARMUP_CALLS, || Owned);
-    run_calls(&runtime, actor, WARMUP_CALLS, || Interleaved);
-    run_calls(&runtime, actor, WARMUP_CALLS, || Exclusive);
+    run_replies(&runtime, &actor, WARMUP_CALLS);
+    run_exclusive(&runtime, &actor, WARMUP_CALLS);
 
     let samples = [
-        ("ready", measure_calls(&runtime, actor, || Ready)),
-        ("owned", measure_calls(&runtime, actor, || Owned)),
         (
-            "interleaved",
-            measure_calls(&runtime, actor, || Interleaved),
+            "reply",
+            measure_calls(|| run_replies(&runtime, &actor, MEASURED_CALLS)),
         ),
-        ("exclusive", measure_calls(&runtime, actor, || Exclusive)),
+        (
+            "exclusive",
+            measure_calls(|| run_exclusive(&runtime, &actor, MEASURED_CALLS)),
+        ),
     ];
 
     println!("reply allocations ({MEASURED_CALLS} calls per mode)");

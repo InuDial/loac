@@ -45,8 +45,7 @@ pub enum CallError {
     /// completion.
     ///
     /// Synchronous handler work and earlier future polls may already have caused
-    /// effects. This error is therefore not proof that retrying is safe, even for
-    /// a handler that selected [`ReplyExt::ready`](crate::ReplyExt::ready).
+    /// effects. This error never proves that retrying is safe.
     #[error("the request was interrupted during dispatch: {0}")]
     DuringDispatch(ExitReason),
 

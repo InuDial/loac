@@ -1,24 +1,25 @@
-//! Message round-trip and interleaving profile benchmarks.
-//!
-//! `interleaving_profile` keeps at most one reply active.
-//! It isolates fixed and unbounded profile overhead.
-//! It does not measure saturated admission or queue scaling.
+//! Message round-trip benchmarks across reply concurrency profiles.
 
-use std::{
-    hint::black_box,
-    time::{Duration, Instant},
-};
+use std::hint::black_box;
 
 use criterion::{Criterion, Throughput, criterion_group, criterion_main};
-use loac::{
-    Actor, ActorRef, ActorScope, Cx, DispatchHandler, Handler, InterleavedFutureExt, Message,
-    ReplyExt, Shutdown,
-};
+use loac::prelude::*;
 
-struct ReplyActor;
+struct SerialActor;
+
+#[loac::actor(mailbox = 1)]
+impl Actor for SerialActor {
+    type SpawnArgs = ();
+
+    async fn init(_args: Self::SpawnArgs, _scope: &mut ActorScope<'_, Self>) -> Self {
+        Self
+    }
+}
+
+struct FixedActor;
 
 #[loac::actor(mailbox = 1, interleaved = 1)]
-impl Actor for ReplyActor {
+impl Actor for FixedActor {
     type SpawnArgs = ();
 
     async fn init(_args: Self::SpawnArgs, _scope: &mut ActorScope<'_, Self>) -> Self {
@@ -26,10 +27,10 @@ impl Actor for ReplyActor {
     }
 }
 
-struct UnboundedReplyActor;
+struct UnboundedActor;
 
 #[loac::actor(mailbox = 1, interleaved = unbounded)]
-impl Actor for UnboundedReplyActor {
+impl Actor for UnboundedActor {
     type SpawnArgs = ();
 
     async fn init(_args: Self::SpawnArgs, _scope: &mut ActorScope<'_, Self>) -> Self {
@@ -39,182 +40,84 @@ impl Actor for UnboundedReplyActor {
 
 #[derive(Message)]
 #[message(reply = u64)]
-struct Ready;
+struct Reply;
 
-impl DispatchHandler<Ready> for ReplyActor {
-    fn handle(
-        &mut self,
-        _message: Ready,
-        _scope: &mut ActorScope<Self>,
-    ) -> impl loac::IntoReply<Self, Ready> {
-        1.ready()
-    }
+macro_rules! reply_handler {
+    ($actor:ty) => {
+        impl Handler<Reply> for $actor {
+            async fn handle(_message: Reply, _cx: Cx<'_, Self>) -> u64 {
+                1
+            }
+        }
+    };
 }
 
-#[derive(Message)]
-#[message(reply = u64)]
-struct Owned;
-
-impl DispatchHandler<Owned> for ReplyActor {
-    fn handle(
-        &mut self,
-        _message: Owned,
-        _scope: &mut ActorScope<Self>,
-    ) -> impl loac::IntoReply<Self, Owned> {
-        std::future::ready(1)
-    }
-}
-
-#[derive(Message)]
-#[message(reply = u64)]
-struct Interleaved;
-
-impl DispatchHandler<Interleaved> for ReplyActor {
-    fn handle(
-        &mut self,
-        _message: Interleaved,
-        _scope: &mut ActorScope<Self>,
-    ) -> impl loac::IntoReply<Self, Interleaved> {
-        std::future::ready(1).interleaved()
-    }
-}
-
-impl DispatchHandler<Interleaved> for UnboundedReplyActor {
-    fn handle(
-        &mut self,
-        _message: Interleaved,
-        _scope: &mut ActorScope<Self>,
-    ) -> impl loac::IntoReply<Self, Interleaved> {
-        std::future::ready(1).interleaved()
-    }
-}
+reply_handler!(SerialActor);
+reply_handler!(FixedActor);
+reply_handler!(UnboundedActor);
 
 #[derive(Message)]
 #[message(reply = u64)]
 struct Exclusive;
 
-impl Handler<Exclusive> for ReplyActor {
+impl Handler<Exclusive> for FixedActor {
     async fn handle(_message: Exclusive, mut cx: Cx<'_, Self>) -> u64 {
         let _guard = cx.exclusive();
         1
     }
 }
 
-#[derive(Clone, Copy, Eq, PartialEq)]
-enum MeasuredProfile {
-    Fixed,
-    Unbounded,
-}
-
-async fn measure_round_trip<A>(actor: &ActorRef<A>, measured: bool) -> Duration
-where
-    A: DispatchHandler<Interleaved>,
-{
-    let started = Instant::now();
-    let reply = actor
-        .call(Interleaved)
-        .await
-        .expect("the benchmark actor stays alive");
-    let elapsed = started.elapsed();
-    black_box(reply);
-    if measured { elapsed } else { Duration::ZERO }
-}
-
-// Every sample drives both paths. Their order alternates each iteration.
-async fn measure_interleaving_profile(
-    iterations: u64,
-    measured: MeasuredProfile,
-    fixed: ActorRef<ReplyActor>,
-    unbounded: ActorRef<UnboundedReplyActor>,
-) -> Duration {
-    let mut elapsed = Duration::ZERO;
-    for iteration in 0..iterations {
-        let fixed_measured = measured == MeasuredProfile::Fixed;
-        if iteration % 2 == 0 {
-            elapsed += measure_round_trip(&fixed, fixed_measured).await;
-            elapsed += measure_round_trip(&unbounded, !fixed_measured).await;
-        } else {
-            elapsed += measure_round_trip(&unbounded, !fixed_measured).await;
-            elapsed += measure_round_trip(&fixed, fixed_measured).await;
-        }
-    }
-    elapsed
-}
-
 fn message_round_trip(criterion: &mut Criterion) {
     let runtime = tokio::runtime::Builder::new_current_thread()
         .build()
         .expect("the benchmark runtime builds");
-    let owner = runtime.block_on(async { loac::spawn::<ReplyActor>(()) });
-    let actor = owner.actor_ref();
-    let unbounded_owner = runtime.block_on(async { loac::spawn::<UnboundedReplyActor>(()) });
-    let unbounded_actor = unbounded_owner.actor_ref();
+    let serial = runtime.block_on(async { loac::spawn::<SerialActor>(()) });
+    let fixed = runtime.block_on(async { loac::spawn::<FixedActor>(()) });
+    let unbounded = runtime.block_on(async { loac::spawn::<UnboundedActor>(()) });
 
     let mut group = criterion.benchmark_group("message_round_trip");
     group.throughput(Throughput::Elements(1));
 
-    group.bench_function("ready", |bencher| {
-        bencher.to_async(&runtime).iter(|| async {
-            let reply = actor.call(Ready).await.expect("the actor stays alive");
-            black_box(reply)
-        });
+    group.bench_function("serial", |bencher| {
+        bencher
+            .to_async(&runtime)
+            .iter(|| async { black_box(serial.call(Reply).await.expect("the actor stays alive")) });
     });
-
-    group.bench_function("owned", |bencher| {
-        bencher.to_async(&runtime).iter(|| async {
-            let reply = actor.call(Owned).await.expect("the actor stays alive");
-            black_box(reply)
-        });
-    });
-
-    group.bench_function("interleaved", |bencher| {
-        bencher.to_async(&runtime).iter(|| async {
-            let reply = actor
-                .call(Interleaved)
-                .await
-                .expect("the actor stays alive");
-            black_box(reply)
-        });
-    });
-
-    group.bench_function("exclusive", |bencher| {
-        bencher.to_async(&runtime).iter(|| async {
-            let reply = actor.call(Exclusive).await.expect("the actor stays alive");
-            black_box(reply)
-        });
-    });
-
-    group.finish();
-
-    // Each result accumulates only its selected round trip.
-    let mut group = criterion.benchmark_group("interleaving_profile");
-    group.throughput(Throughput::Elements(1));
     group.bench_function("fixed", |bencher| {
-        bencher.to_async(&runtime).iter_custom(|iterations| {
-            measure_interleaving_profile(
-                iterations,
-                MeasuredProfile::Fixed,
-                actor.clone(),
-                unbounded_actor.clone(),
-            )
-        });
+        bencher
+            .to_async(&runtime)
+            .iter(|| async { black_box(fixed.call(Reply).await.expect("the actor stays alive")) });
     });
     group.bench_function("unbounded", |bencher| {
-        bencher.to_async(&runtime).iter_custom(|iterations| {
-            measure_interleaving_profile(
-                iterations,
-                MeasuredProfile::Unbounded,
-                actor.clone(),
-                unbounded_actor.clone(),
-            )
+        bencher.to_async(&runtime).iter(|| async {
+            black_box(unbounded.call(Reply).await.expect("the actor stays alive"))
+        });
+    });
+    group.bench_function("exclusive", |bencher| {
+        bencher.to_async(&runtime).iter(|| async {
+            black_box(fixed.call(Exclusive).await.expect("the actor stays alive"))
         });
     });
     group.finish();
 
-    let reason = runtime.block_on(owner.shutdown(Shutdown::Kill));
-    assert_eq!(reason.reason(), loac::ExitReason::Killed);
-    let reason = runtime.block_on(unbounded_owner.shutdown(Shutdown::Kill));
-    assert_eq!(reason.reason(), loac::ExitReason::Killed);
+    assert_eq!(
+        runtime
+            .block_on(serial.shutdown(loac::Shutdown::Kill))
+            .reason(),
+        loac::ExitReason::Killed
+    );
+    assert_eq!(
+        runtime
+            .block_on(fixed.shutdown(loac::Shutdown::Kill))
+            .reason(),
+        loac::ExitReason::Killed
+    );
+    assert_eq!(
+        runtime
+            .block_on(unbounded.shutdown(loac::Shutdown::Kill))
+            .reason(),
+        loac::ExitReason::Killed
+    );
 }
 
 criterion_group!(benches, message_round_trip);

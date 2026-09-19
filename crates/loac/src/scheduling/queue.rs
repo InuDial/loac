@@ -16,9 +16,9 @@ use super::{ScheduledFuture, drop_without_unwind};
 
 const ACTIVE_POLL_BUDGET: usize = 16;
 
-/// Outcome of one interleaved collection poll.
+/// Outcome of one reply collection poll.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(super) enum InterleavedPoll {
+pub(super) enum ReplyPoll {
     /// No reply completed, and no budget cutoff remains.
     Pending,
     /// A reply completed or lifecycle changed.
@@ -67,7 +67,7 @@ impl Queue {
         control: &Control,
         expected_mode: Mode,
         task: &mut Context<'_>,
-    ) -> InterleavedPoll {
+    ) -> ReplyPoll {
         if self.is_leased() {
             return self.poll_leased(control, expected_mode, task);
         }
@@ -87,7 +87,7 @@ impl Queue {
         control: &Control,
         expected_mode: Mode,
         task: &mut Context<'_>,
-    ) -> InterleavedPoll {
+    ) -> ReplyPoll {
         let wake = self
             .sweep
             .wake
@@ -102,7 +102,7 @@ impl Queue {
             .poll(&mut item_task);
         self.sweep.restart();
         if control.mode() != expected_mode {
-            return InterleavedPoll::Progress;
+            return ReplyPoll::Progress;
         }
         if result.is_ready() {
             let completed = self
@@ -110,13 +110,13 @@ impl Queue {
                 .pop_front()
                 .expect("the leased reply just completed");
             control.drop_user_value(completed);
-            return InterleavedPoll::Progress;
+            return ReplyPoll::Progress;
         }
         if self.is_leased() {
-            InterleavedPoll::Leased
+            ReplyPoll::Leased
         } else {
             self.items.rotate_left(1);
-            InterleavedPoll::Progress
+            ReplyPoll::Progress
         }
     }
 
@@ -161,10 +161,10 @@ fn poll_round_robin<T>(
     task: &mut Context<'_>,
     mut poll: impl FnMut(&mut T, &mut Context<'_>) -> Poll<()>,
     mut is_leased: impl FnMut(&T) -> bool,
-) -> InterleavedPoll {
+) -> ReplyPoll {
     if items.is_empty() {
         sweep.clear();
-        return InterleavedPoll::Pending;
+        return ReplyPoll::Pending;
     }
 
     let wake = sweep
@@ -197,7 +197,7 @@ fn poll_round_robin<T>(
             }
             Poll::Pending if is_leased(&items[0]) => {
                 sweep.restart();
-                return InterleavedPoll::Leased;
+                return ReplyPoll::Leased;
             }
             Poll::Pending => items.rotate_left(1),
         }
@@ -209,7 +209,7 @@ fn poll_round_robin<T>(
         sweep.clear();
     }
     if control.mode() != expected_mode {
-        return InterleavedPoll::Progress;
+        return ReplyPoll::Progress;
     }
     if sweep.remaining > 0 {
         sweep
@@ -217,7 +217,7 @@ fn poll_round_robin<T>(
             .as_ref()
             .expect("an active sweep retains its waker")
             .wake_task();
-        return InterleavedPoll::BudgetExhausted;
+        return ReplyPoll::BudgetExhausted;
     } else if let Some(wake) = &sweep.wake
         && wake.generation() != sweep.generation
     {
@@ -225,9 +225,9 @@ fn poll_round_robin<T>(
     }
 
     if completed {
-        InterleavedPoll::Progress
+        ReplyPoll::Progress
     } else {
-        InterleavedPoll::Pending
+        ReplyPoll::Pending
     }
 }
 

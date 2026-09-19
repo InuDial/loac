@@ -1,14 +1,15 @@
 use std::{fmt, future::Future, pin::Pin, sync::Arc, task};
 
 use crate::{
-    Actor, CallError, DispatchHandler, ExitStatus, HasReply, Message, SendError, SendToError,
-    Shutdown, ShutdownStatus, StreamHandler, StreamMessage, TryCallError, TryCallErrorKind,
-    TrySendError, TrySendErrorKind, Writer,
-    actor::{HasInterleaving, HasMailbox},
+    Actor, CallError, ExitStatus, HasReply, Message, SendError, SendToError, Shutdown,
+    ShutdownStatus, StreamHandler, StreamMessage, TryCallError, TryCallErrorKind, TrySendError,
+    TrySendErrorKind, Writer,
+    actor::HasMailbox,
     mailbox::{
         ActorInner, CallEnvelope, Mode, ReplyReceiver, SendEnvelope, StreamToEnvelope,
         poll_with_panic_safe_waker,
     },
+    reply::DispatchMessage,
     transport::{MessageConfig, MessageReservation, MessageSender, TryReserveError},
 };
 
@@ -78,6 +79,10 @@ impl<A: Actor> private::Sealed for ActorRef<A> {}
 
 impl<M: Message> private::Sealed for Arc<dyn Recipient<M>> {}
 
+#[allow(
+    private_bounds,
+    reason = "message dispatch stays sealed behind public address methods"
+)]
 impl<A: Actor> ActorRef<A> {
     pub(crate) fn new(inner: Arc<ActorInner<A>>) -> Self {
         Self(inner)
@@ -90,7 +95,8 @@ impl<A: Actor> ActorRef<A> {
     #[must_use]
     pub fn recipient<M>(&self) -> Arc<dyn Recipient<M>>
     where
-        A: DispatchHandler<M, M::Kind>,
+        A: HasMailbox,
+        M::Kind: DispatchMessage<A, M>,
         M: Message,
     {
         let recipient: Arc<dyn Recipient<M>> = Arc::new(self.clone());
@@ -113,16 +119,16 @@ impl<A: Actor> ActorRef<A> {
     /// After dispatch, successful completion and lifecycle interruption also
     /// have one commit point. Completion first returns `Ok`, even if Kill follows
     /// immediately. Kill, panic, or executor teardown first returns
-    /// [`CallError::DuringDispatch`], including when the handler selected
-    /// [`ReplyExt::ready`](crate::ReplyExt::ready).
+    /// [`CallError::DuringDispatch`].
     ///
     /// This method has no built-in deadline and can wait indefinitely while a
     /// running actor or its mailbox makes no progress. An external timeout drops
     /// the call; if dispatch already began, the handler still continues.
     pub async fn call<M>(&self, message: M) -> Result<M::Reply, CallError>
     where
-        A: DispatchHandler<M, M::Kind>,
+        A: HasMailbox,
         M: Message + HasReply,
+        M::Kind: DispatchMessage<A, M>,
     {
         let response = match self.try_call(message) {
             Ok(response) => response,
@@ -163,7 +169,7 @@ impl<A: Actor> ActorRef<A> {
     /// continues.
     pub async fn call_to<M, W>(&self, message: M, out: W) -> Result<M::Final, CallError>
     where
-        A: StreamHandler<M> + HasInterleaving,
+        A: StreamHandler<M>,
         M: StreamMessage,
         W: Writer<M::Item> + Send + 'static,
     {
@@ -201,8 +207,9 @@ impl<A: Actor> ActorRef<A> {
     /// [`try_send`](Self::try_send) when capacity failure must return the message.
     pub async fn send<M>(&self, message: M) -> Result<(), SendError<M>>
     where
-        A: DispatchHandler<M, M::Kind>,
+        A: HasMailbox,
         M: Message<Reply = ()>,
+        M::Kind: DispatchMessage<A, M>,
     {
         match self.try_send(message) {
             Ok(()) => Ok(()),
@@ -232,7 +239,7 @@ impl<A: Actor> ActorRef<A> {
     /// `out`; the final value is produced and dropped.
     pub async fn send_to<M, W>(&self, message: M, out: W) -> Result<(), SendToError<M, W>>
     where
-        A: StreamHandler<M> + HasInterleaving,
+        A: StreamHandler<M>,
         M: StreamMessage,
         W: Writer<M::Item> + Send + 'static,
     {
@@ -259,8 +266,9 @@ impl<A: Actor> ActorRef<A> {
     /// [`TryCallErrorKind::Closed`] means lifecycle shutdown had closed admission.
     pub fn try_call<M>(&self, message: M) -> Result<Response<M::Reply>, TryCallError<M>>
     where
-        A: DispatchHandler<M, M::Kind>,
+        A: HasMailbox,
         M: Message + HasReply,
+        M::Kind: DispatchMessage<A, M>,
     {
         let inner = &self.0;
 
@@ -298,8 +306,9 @@ impl<A: Actor> ActorRef<A> {
     /// [`TrySendErrorKind::Closed`] means lifecycle shutdown had closed admission.
     pub fn try_send<M>(&self, message: M) -> Result<(), TrySendError<M>>
     where
-        A: DispatchHandler<M, M::Kind>,
+        A: HasMailbox,
         M: Message<Reply = ()>,
+        M::Kind: DispatchMessage<A, M>,
     {
         let inner = &self.0;
 
@@ -366,8 +375,9 @@ impl<A: Actor> ActorRef<A> {
     /// Builds and admits a call with either reservation ownership shape.
     fn admit_call<M, R>(&self, reservation: R, message: M) -> Result<Response<M::Reply>, M>
     where
-        A: DispatchHandler<M, M::Kind>,
+        A: HasMailbox,
         M: Message,
+        M::Kind: DispatchMessage<A, M>,
         R: MessageReservation<A>,
     {
         let (envelope, response) = CallEnvelope::new(message);
@@ -384,8 +394,9 @@ impl<A: Actor> ActorRef<A> {
     /// Builds and admits a one-way envelope with either reservation shape.
     fn admit_send<M, R>(&self, reservation: R, message: M) -> Result<(), M>
     where
-        A: DispatchHandler<M, M::Kind>,
+        A: HasMailbox,
         M: Message<Reply = ()>,
+        M::Kind: DispatchMessage<A, M>,
         R: MessageReservation<A>,
     {
         let envelope = Box::new(SendEnvelope::new(message));
@@ -406,7 +417,7 @@ impl<A: Actor> ActorRef<A> {
         out: W,
     ) -> Result<Response<M::Final>, (M, W)>
     where
-        A: StreamHandler<M> + HasInterleaving,
+        A: StreamHandler<M>,
         M: StreamMessage,
         W: Writer<M::Item> + Send + 'static,
         R: MessageReservation<A>,
@@ -425,7 +436,7 @@ impl<A: Actor> ActorRef<A> {
     /// Builds and admits a one-way stream envelope carrying a caller writer.
     fn admit_stream_send<M, W, R>(&self, reservation: R, message: M, out: W) -> Result<(), (M, W)>
     where
-        A: StreamHandler<M> + HasInterleaving,
+        A: StreamHandler<M>,
         M: StreamMessage,
         W: Writer<M::Item> + Send + 'static,
         R: MessageReservation<A>,
@@ -519,8 +530,9 @@ impl<A: Actor> fmt::Debug for ActorRef<A> {
 
 impl<A, M> Recipient<M> for ActorRef<A>
 where
-    A: Actor + DispatchHandler<M, M::Kind>,
+    A: Actor + HasMailbox,
     M: Message,
+    M::Kind: DispatchMessage<A, M>,
 {
     fn call<'a>(
         &'a self,

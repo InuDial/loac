@@ -1,8 +1,8 @@
 use std::sync::{Arc, Mutex};
 
 use loac::{
-    Actor, ActorRef, ActorScope, CallError, Cx, DispatchHandler, ExitReason, Handler, Message,
-    ReplyExt, Shutdown, ShutdownStatus, StopScope, actor,
+    Actor, ActorRef, ActorScope, CallError, Cx, ExitReason, Handler, Message, Shutdown,
+    ShutdownStatus, StopScope, actor,
 };
 use tokio::sync::oneshot;
 
@@ -29,14 +29,10 @@ impl Actor for Worker {
 #[message(reply = u8)]
 struct Work(u8);
 
-impl DispatchHandler<Work> for Worker {
-    fn handle(
-        &mut self,
-        message: Work,
-        _scope: &mut ActorScope<'_, Self>,
-    ) -> impl loac::IntoReply<Self, Work> {
-        lock(&self.log).push(format!("work-{}", message.0));
-        message.0.ready()
+impl Handler<Work> for Worker {
+    async fn handle(message: Work, mut cx: Cx<'_, Self>) -> u8 {
+        cx.with(|actor, _| lock(&actor.log).push(format!("work-{}", message.0)));
+        message.0
     }
 }
 
@@ -88,14 +84,10 @@ impl Handler<ParentBlock> for DrainParent {
 #[message(reply = Result<u8, CallError>)]
 struct Forward(u8);
 
-impl DispatchHandler<Forward> for DrainParent {
-    fn handle(
-        &mut self,
-        message: Forward,
-        _scope: &mut ActorScope<'_, Self>,
-    ) -> impl loac::IntoReply<Self, Forward> {
-        let worker = self.worker.clone();
-        async move { worker.call(Work(message.0)).await }
+impl Handler<Forward> for DrainParent {
+    async fn handle(message: Forward, mut cx: Cx<'_, Self>) -> Result<u8, CallError> {
+        let worker = cx.with(|actor, _| actor.worker.clone());
+        worker.call(Work(message.0)).await
     }
 }
 

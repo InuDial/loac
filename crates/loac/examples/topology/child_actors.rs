@@ -2,7 +2,7 @@
 //! Each agent is a child actor.
 //! Choose independent roots for independently owned agents.
 
-use loac::{ActorRef, DispatchHandler, ReplyExt, prelude::*};
+use loac::{ActorRef, prelude::*};
 
 #[derive(Debug, PartialEq, Eq)]
 struct Report {
@@ -25,17 +25,12 @@ impl Actor for Agent {
 #[message(reply = Report)]
 struct Review(&'static str);
 
-impl DispatchHandler<Review> for Agent {
-    fn handle(
-        &mut self,
-        message: Review,
-        _scope: &mut ActorScope<Self>,
-    ) -> impl loac::IntoReply<Self, Review> {
-        Report {
-            agent: self.0,
+impl Handler<Review> for Agent {
+    async fn handle(message: Review, mut cx: Cx<'_, Self>) -> Report {
+        cx.with(|actor, _| Report {
+            agent: actor.0,
             subject: message.0,
-        }
-        .ready()
+        })
     }
 }
 
@@ -64,21 +59,17 @@ impl Actor for Team {
 #[message(reply = Result<[Report; 2], loac::CallError>)]
 struct ReviewTask(&'static str);
 
-impl DispatchHandler<ReviewTask> for Team {
-    fn handle(
-        &mut self,
+impl Handler<ReviewTask> for Team {
+    async fn handle(
         message: ReviewTask,
-        _scope: &mut ActorScope<Self>,
-    ) -> impl IntoReply<Self, ReviewTask> {
-        let [correctness, readability] = self.agents.clone();
-
-        async move {
-            let (correctness, readability) = tokio::try_join!(
-                correctness.call(Review(message.0)),
-                readability.call(Review(message.0)),
-            )?;
-            Ok([correctness, readability])
-        }
+        mut cx: Cx<'_, Self>,
+    ) -> Result<[Report; 2], loac::CallError> {
+        let [correctness, readability] = cx.with(|actor, _| actor.agents.clone());
+        let (correctness, readability) = tokio::try_join!(
+            correctness.call(Review(message.0)),
+            readability.call(Review(message.0)),
+        )?;
+        Ok([correctness, readability])
     }
 }
 

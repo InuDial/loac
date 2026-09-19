@@ -63,7 +63,7 @@ See the [examples index](examples/README.md) for runnable guides.
 ## Choose Capabilities
 
 `#[actor(...)]` generates the runtime configuration.
-Messaging, interleaved replies, and child ownership are opt-in.
+Messaging and child ownership are opt-in.
 Omitting an option removes that capability.
 `mailbox`, `interleaved`, and `children` share the five forms below.
 An explicit finite limit must be a nonzero `usize` constant.
@@ -85,12 +85,13 @@ It does not bound active replies. [`call`](https://docs.rs/loac/latest/loac/stru
 [`try_call`](https://docs.rs/loac/latest/loac/struct.ActorRef.html#method.try_call) and [`try_send`](https://docs.rs/loac/latest/loac/struct.ActorRef.html#method.try_send) return immediately.
 Dynamic options expose [`with_mailbox_capacity`](https://docs.rs/loac/latest/loac/trait.DynamicMailboxOptions.html#tymethod.with_mailbox_capacity).
 
-### Interleaved Replies
+### Handler Concurrency
 
 Here `option` is `interleaved`. It requires `mailbox`.
 
-The limit counts active replies. A full limit pauses dispatch before another
-handler starts. Scoped scheduler leases require `interleaved`.
+The limit counts active handler futures.
+A full limit pauses dispatch before another handler starts.
+Omitting `interleaved` permits one active handler.
 Dynamic options expose [`with_max_in_flight`](https://docs.rs/loac/latest/loac/trait.DynamicInterleavingOptions.html#tymethod.with_max_in_flight).
 
 ### Child-Spawning
@@ -110,58 +111,38 @@ See the [attribute reference](https://docs.rs/loac/latest/loac/attr.actor.html) 
 
 | Attribute | Handler trait | Caller receives |
 | --- | --- | --- |
-| `#[message(reply = Type)]` | [`Handler`](https://docs.rs/loac/latest/loac/trait.Handler.html) or [`SyncHandler`](https://docs.rs/loac/latest/loac/trait.SyncHandler.html) | `Type` |
+| `#[message(reply = Type)]` | [`Handler`](https://docs.rs/loac/latest/loac/trait.Handler.html) | `Type` |
 | `#[message(stream = Item, reply = Final)]` | [`StreamHandler`](https://docs.rs/loac/latest/loac/trait.StreamHandler.html) | `StreamReply<Item, Final>` |
 
-**Use `#[message(reply = Type)]` and `Handler<M>` for ordinary asynchronous
-request handling.** Declare the eventual result as `Type`, including
-`Result<Value, Error>` when appropriate. The handler returns a future, and
-`loac` schedules it on the interleaved lane.
-
-Use `#[message(reply = Type)]`, `SyncHandler<M>`, and attach
-`#[loac::sync_handler]` to the impl when the reply value is already complete
-by the time the handler returns. `SyncHandler` receives `&mut self` directly,
-needs no interleaving lane, and is the short way to write a ready reply.
-
-Implement [`DispatchHandler`](https://docs.rs/loac/latest/loac/trait.DispatchHandler.html)
-directly only when a handler must choose an explicit reply strategy — for
-example, runtime branching between ready and an independently scheduled owned
-future, interleaved execution, or another runtime choice. Explicit dispatch
-changes handler implementation and scheduling, not the declared result type.
+Use `#[message(reply = Type)]` and `Handler<M>`.
+Declare the eventual result as `Type`.
+This includes `Result<Value, Error>` when appropriate.
+The actor task owns and polls the returned future.
 
 Omitting the `#[message(...)]` attribute entirely produces a send-only
 message with unit output. Selecting either `reply` or `stream` implements
 `HasReply` and makes the message callable with `ActorRef::call`; the caller
 still receives `Result<M::Reply, CallError>`. Reply and final types default
-to `()` when omitted. `SyncHandler` uses the `reply` shape and dispatches
-through a concrete impl emitted by the `#[loac::sync_handler]` attribute
-macro.
+to `()` when omitted.
 
-## Reply Modes
+## Reply Scheduling
 
-| Strategy | Selected by | Actor progress while the reply runs |
-| --- | --- | --- |
-| ready | [`value.ready()`](https://docs.rs/loac/latest/loac/trait.ReplyExt.html#method.ready) from a [`DispatchHandler`](https://docs.rs/loac/latest/loac/trait.DispatchHandler.html) or [`SyncHandler`](https://docs.rs/loac/latest/loac/trait.SyncHandler.html) | The reply is already complete during dispatch. |
-| owned | A bare `Future` from a [`DispatchHandler`](https://docs.rs/loac/latest/loac/trait.DispatchHandler.html) | A Tokio task runs it beside all actor work. |
-| interleaved | [`Handler`](https://docs.rs/loac/latest/loac/trait.Handler.html), [`StreamHandler`](https://docs.rs/loac/latest/loac/trait.StreamHandler.html), or `future.interleaved()` | The actor task polls it fairly with other actor work. |
-
-`Handler` and `StreamHandler` always select interleaved scheduling, so they
-require `interleaved`. A `DispatchHandler` selects explicit strategies.
+Every message handler returns one future.
+The actor task schedules all handler futures fairly.
+Mailbox profiles limit their active count.
 
 `Handler` and `StreamHandler` receive a `Cx` handle.
 Call `Cx::with` for temporary actor and scope access.
 Call `Cx::exclusive` for a scoped scheduler lease.
-Scheduled actor work pauses until that guard drops.
+All scheduled actor work pauses until that guard drops.
 Graceful `on_shutdown` hooks may still preempt the lease.
 
 See the [`Cx` safety argument](SAFETY.md) for unsafe invariants.
 
 Stream messages use `#[message(stream = Item, reply = Final)]`. The runtime
 creates a bounded item channel and returns the receiver to the caller as a
-`StreamReply`. `StreamHandler` produces items from an async `cx` future polled
-on the interleaved lane. An explicit `DispatchHandler<M, StreamKind>` selects
-a stream-final strategy and assembles the channel plumbing with
-`StreamDispatch::new`. The item stream ends when the handler drops its writer.
+`StreamReply`. `StreamHandler` produces items through its `StreamOut` writer.
+The item stream ends when the handler drops its writer.
 
 ## Lifecycle and Shutdown
 

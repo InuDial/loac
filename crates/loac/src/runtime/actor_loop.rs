@@ -20,8 +20,6 @@ pub(crate) async fn run_actor<A: Actor>(
 ) -> ExitStatus {
     let inner = Arc::clone(&actor_ref.0);
     let control = &inner.control;
-    let owned = OwnedTasks::new(Arc::clone(&inner));
-
     let initialized = if let Some(_permit) = control.begin_initialization() {
         let mut scope = state.actor_scope(&actor_ref);
         match panic::catch_unwind(AssertUnwindSafe(|| A::init(args, &mut scope))) {
@@ -39,17 +37,17 @@ pub(crate) async fn run_actor<A: Actor>(
     let actor = match initialized {
         Work::Complete(actor) => actor,
         Work::Killed => {
-            return kill_uninitialized(&mut state, &mut inbox, control, &owned).await;
+            return kill_uninitialized(&mut state, &mut inbox, control).await;
         }
         Work::Panicked => {
-            return fail_uninitialized(&mut state, &mut inbox, control, &owned).await;
+            return fail_uninitialized(&mut state, &mut inbox, control).await;
         }
         Work::DropPanicked(actor) => {
             // The init frame failed after producing actor state.
             // Descendant cancellation must precede arbitrary actor Drop code.
             state.children().request_all(Shutdown::Kill);
             control.drop_user_value(actor);
-            return fail_uninitialized(&mut state, &mut inbox, control, &owned).await;
+            return fail_uninitialized(&mut state, &mut inbox, control).await;
         }
     };
 
@@ -74,7 +72,6 @@ pub(crate) async fn run_actor<A: Actor>(
                             &mut running.access,
                             &mut inbox,
                             control,
-                            &owned,
                             &mut running.scheduler,
                         )
                         .await;
@@ -84,7 +81,6 @@ pub(crate) async fn run_actor<A: Actor>(
                     &mut running.access,
                     &mut inbox,
                     &inner,
-                    &owned,
                     &mut running.scheduler,
                 )
                 .await;
@@ -102,7 +98,6 @@ pub(crate) async fn run_actor<A: Actor>(
                             &mut running.access,
                             &mut inbox,
                             control,
-                            &owned,
                             &mut running.scheduler,
                         )
                         .await;
@@ -112,7 +107,6 @@ pub(crate) async fn run_actor<A: Actor>(
                     &mut running.access,
                     &mut inbox,
                     control,
-                    &owned,
                     &mut running.scheduler,
                 )
                 .await;
@@ -122,7 +116,6 @@ pub(crate) async fn run_actor<A: Actor>(
                     &mut running.access,
                     &mut inbox,
                     control,
-                    &owned,
                     &mut running.scheduler,
                 )
                 .await;
@@ -132,7 +125,6 @@ pub(crate) async fn run_actor<A: Actor>(
                     &mut running.access,
                     &mut inbox,
                     control,
-                    &owned,
                     &mut running.scheduler,
                 )
                 .await;
@@ -147,7 +139,6 @@ pub(crate) async fn run_actor<A: Actor>(
             &mut running.access,
             &mut inbox,
             &inner,
-            &owned,
             &mut running.scheduler,
             true,
             Mode::Running,
@@ -163,7 +154,6 @@ pub(crate) async fn run_actor<A: Actor>(
                     &mut running.access,
                     &mut inbox,
                     control,
-                    &owned,
                     &mut running.scheduler,
                 )
                 .await;
@@ -180,7 +170,6 @@ pub(crate) async fn run_actor<A: Actor>(
                             &mut running.access,
                             &mut inbox,
                             control,
-                            &owned,
                             &mut running.scheduler,
                         )
                         .await;
@@ -191,7 +180,6 @@ pub(crate) async fn run_actor<A: Actor>(
                             &mut running.access,
                             &mut inbox,
                             control,
-                            &owned,
                             &mut running.scheduler,
                         )
                         .await;
@@ -204,7 +192,6 @@ pub(crate) async fn run_actor<A: Actor>(
                     &mut running.access,
                     &mut inbox,
                     control,
-                    &owned,
                     &mut running.scheduler,
                 )
                 .await;
@@ -218,31 +205,29 @@ pub(crate) enum DrainTurn {
     RepliesFinished,
 }
 
-// Scheduler work keeps priority over the owned-task completion barrier.
-// The nested scheduler turn preserves lifecycle-first polling.
+// The scheduler owns every dispatched reply.
 pub(crate) async fn drain_turn<A: Actor>(
     access: &mut ActorAccess<A>,
     inbox: &mut ActorInbox<A>,
     inner: &Arc<ActorInner<A>>,
-    owned: &OwnedTasks<A>,
     scheduler: &mut ActorScheduler<A>,
     receive_messages: bool,
 ) -> DrainTurn {
-    let wait_for_owned = !receive_messages && RuntimeScheduler::is_idle(scheduler);
+    if !receive_messages && RuntimeScheduler::is_idle(scheduler) {
+        return DrainTurn::RepliesFinished;
+    }
 
-    tokio::select! {
-        biased;
-        turn = actor_turn(
+    DrainTurn::Scheduled(
+        actor_turn(
             access,
             inbox,
             inner,
-            owned,
             scheduler,
             receive_messages,
             Mode::Draining,
-        ) => DrainTurn::Scheduled(turn),
-        () = owned.wait(), if wait_for_owned => DrainTurn::RepliesFinished,
-    }
+        )
+        .await,
+    )
 }
 
 pub(crate) async fn handle_child_exit<A: Actor>(
@@ -284,7 +269,6 @@ pub(crate) async fn actor_turn<A: Actor>(
     access: &mut ActorAccess<A>,
     inbox: &mut ActorInbox<A>,
     inner: &Arc<ActorInner<A>>,
-    owned: &OwnedTasks<A>,
     scheduler: &mut ActorScheduler<A>,
     receive_messages: bool,
     expected_mode: Mode,
@@ -295,7 +279,6 @@ pub(crate) async fn actor_turn<A: Actor>(
             access,
             inbox,
             inner,
-            owned,
             receive_messages,
             expected_mode,
         };

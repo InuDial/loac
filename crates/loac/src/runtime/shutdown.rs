@@ -4,26 +4,24 @@ pub(crate) async fn stop_actor<A: Actor>(
     access: &mut ActorAccess<A>,
     inbox: &mut ActorInbox<A>,
     control: &Control,
-    owned: &OwnedTasks<A>,
     scheduler: &mut ActorScheduler<A>,
 ) -> ExitStatus {
     match close_and_discard(inbox, control, Mode::Stopping).await {
         DiscardOutcome::Complete => {}
         DiscardOutcome::ModeChanged => match control.mode() {
-            Mode::Killing => return kill_actor(access, inbox, control, owned, scheduler).await,
-            Mode::Failing => return fail_actor(access, inbox, control, owned, scheduler).await,
+            Mode::Killing => return kill_actor(access, inbox, control, scheduler).await,
+            Mode::Failing => return fail_actor(access, inbox, control, scheduler).await,
             // Lifecycle cannot return to a graceful mode. Aborting and Exited
             // belong to ActorTask's outer drop/publication path, which cannot
             // repoll this inner future after committing either state.
             mode => unreachable!("stop discard observed impossible mode: {mode:?}"),
         },
     }
-    owned.close();
-    match finish_replies(control, owned, scheduler).await {
+    match finish_replies::<A>(control, scheduler).await {
         Work::Complete(()) => {}
-        Work::Killed => return kill_actor(access, inbox, control, owned, scheduler).await,
+        Work::Killed => return kill_actor(access, inbox, control, scheduler).await,
         Work::Panicked | Work::DropPanicked(()) => {
-            return fail_actor(access, inbox, control, owned, scheduler).await;
+            return fail_actor(access, inbox, control, scheduler).await;
         }
     }
 
@@ -32,9 +30,9 @@ pub(crate) async fn stop_actor<A: Actor>(
             .state()
             .children()
             .terminal_status(ExitReason::Stopped),
-        Work::Killed => kill_actor(access, inbox, control, owned, scheduler).await,
+        Work::Killed => kill_actor(access, inbox, control, scheduler).await,
         Work::Panicked | Work::DropPanicked(()) => {
-            fail_actor(access, inbox, control, owned, scheduler).await
+            fail_actor(access, inbox, control, scheduler).await
         }
     }
 }
@@ -43,7 +41,6 @@ pub(crate) async fn drain_actor<A: Actor>(
     access: &mut ActorAccess<A>,
     inbox: &mut ActorInbox<A>,
     inner: &Arc<ActorInner<A>>,
-    owned: &OwnedTasks<A>,
     scheduler: &mut ActorScheduler<A>,
 ) -> ExitStatus {
     let control = &inner.control;
@@ -52,16 +49,13 @@ pub(crate) async fn drain_actor<A: Actor>(
     // admission are not accepted work and must not extend graceful shutdown.
     inbox.close();
     let mut inbox_drained = inbox.is_empty();
-    if inbox_drained {
-        owned.close();
-    }
     loop {
         match control.mode() {
             Mode::Killing => {
-                return kill_actor(access, inbox, control, owned, scheduler).await;
+                return kill_actor(access, inbox, control, scheduler).await;
             }
             Mode::Failing => {
-                return fail_actor(access, inbox, control, owned, scheduler).await;
+                return fail_actor(access, inbox, control, scheduler).await;
             }
             Mode::Running | Mode::Draining | Mode::Stopping => {}
             Mode::Exited(status) => return status,
@@ -72,25 +66,17 @@ pub(crate) async fn drain_actor<A: Actor>(
 
         if !inbox_drained && inbox.is_empty() {
             inbox_drained = true;
-            owned.close();
         }
 
-        let turn = AssertUnwindSafe(drain_turn(
-            access,
-            inbox,
-            inner,
-            owned,
-            scheduler,
-            !inbox_drained,
-        ))
-        .catch_unwind()
-        .await;
+        let turn = AssertUnwindSafe(drain_turn(access, inbox, inner, scheduler, !inbox_drained))
+            .catch_unwind()
+            .await;
 
         let turn = match turn {
             Ok(turn) => turn,
             Err(payload) => {
                 control.contain_panic(payload);
-                return fail_actor(access, inbox, control, owned, scheduler).await;
+                return fail_actor(access, inbox, control, scheduler).await;
             }
         };
 
@@ -101,17 +87,16 @@ pub(crate) async fn drain_actor<A: Actor>(
                 match handle_child_exit(access, event, control).await {
                     Work::Complete(()) => {}
                     Work::Killed => {
-                        return kill_actor(access, inbox, control, owned, scheduler).await;
+                        return kill_actor(access, inbox, control, scheduler).await;
                     }
                     Work::Panicked | Work::DropPanicked(()) => {
                         control.begin_failure();
-                        return fail_actor(access, inbox, control, owned, scheduler).await;
+                        return fail_actor(access, inbox, control, scheduler).await;
                     }
                 }
             }
             DrainTurn::Scheduled(SchedulerTurn::InboxClosed) => {
                 inbox_drained = true;
-                owned.close();
             }
         }
     }
@@ -121,18 +106,14 @@ pub(crate) async fn drain_actor<A: Actor>(
             .state()
             .children()
             .terminal_status(ExitReason::Drained),
-        Work::Killed => kill_actor(access, inbox, control, owned, scheduler).await,
+        Work::Killed => kill_actor(access, inbox, control, scheduler).await,
         Work::Panicked | Work::DropPanicked(()) => {
-            fail_actor(access, inbox, control, owned, scheduler).await
+            fail_actor(access, inbox, control, scheduler).await
         }
     }
 }
 
-async fn finish_replies<A: Actor>(
-    control: &Control,
-    owned: &OwnedTasks<A>,
-    scheduler: &mut ActorScheduler<A>,
-) -> Work {
+async fn finish_replies<A: Actor>(control: &Control, scheduler: &mut ActorScheduler<A>) -> Work {
     while !RuntimeScheduler::is_idle(scheduler) {
         match control.mode() {
             Mode::Killing => return Work::Killed,
@@ -164,33 +145,7 @@ async fn finish_replies<A: Actor>(
         }
     }
 
-    loop {
-        match control.mode() {
-            Mode::Killing => return Work::Killed,
-            Mode::Failing => return Work::Panicked,
-            Mode::Running | Mode::Draining | Mode::Stopping => {}
-            Mode::Aborting | Mode::Exited(_) => return Work::Killed,
-        }
-
-        let result = AssertUnwindSafe(async {
-            tokio::select! {
-                biased;
-                () = control.actor_notified() => false,
-                () = owned.wait() => true,
-            }
-        })
-        .catch_unwind()
-        .await;
-
-        match result {
-            Ok(true) => return Work::Complete(()),
-            Ok(false) => {}
-            Err(payload) => {
-                control.contain_panic(payload);
-                return Work::Panicked;
-            }
-        }
-    }
+    Work::Complete(())
 }
 
 /// Graceful shutdown is post-order: a parent finishes the work retained by the
@@ -232,14 +187,12 @@ pub(crate) async fn kill_actor<A: Actor>(
     access: &mut ActorAccess<A>,
     inbox: &mut ActorInbox<A>,
     control: &Control,
-    owned: &OwnedTasks<A>,
     scheduler: &mut ActorScheduler<A>,
 ) -> ExitStatus {
     // Commit subtree cancellation before running arbitrary Drop code from actor
     // work. Children can then begin terminating even if a destructor is slow.
     inbox.close();
     access.state().children().request_all(Shutdown::Kill);
-    owned.close();
     RuntimeScheduler::clear(scheduler, control);
     let mut expected_mode = Mode::Killing;
     loop {
@@ -248,7 +201,6 @@ pub(crate) async fn kill_actor<A: Actor>(
             DiscardOutcome::ModeChanged => expected_mode = control.mode(),
         }
     }
-    owned.wait().await;
     access.state().children().wait_all().await;
     access
         .state()
@@ -260,7 +212,6 @@ pub(crate) async fn fail_actor<A: Actor>(
     access: &mut ActorAccess<A>,
     inbox: &mut ActorInbox<A>,
     control: &Control,
-    owned: &OwnedTasks<A>,
     scheduler: &mut ActorScheduler<A>,
 ) -> ExitStatus {
     control.begin_failure();
@@ -272,7 +223,6 @@ pub(crate) async fn fail_actor<A: Actor>(
     };
     inbox.close();
     access.state().children().request_all(Shutdown::Kill);
-    owned.close();
     RuntimeScheduler::clear(scheduler, control);
     let mut expected_mode = control.mode();
     loop {
@@ -281,7 +231,6 @@ pub(crate) async fn fail_actor<A: Actor>(
             DiscardOutcome::ModeChanged => expected_mode = control.mode(),
         }
     }
-    owned.wait().await;
     access.state().children().wait_all().await;
     access.state().children().terminal_status(reason)
 }
@@ -292,13 +241,10 @@ pub(crate) async fn kill_uninitialized<A: Actor>(
     state: &mut ScopeState<A>,
     inbox: &mut ActorInbox<A>,
     control: &Control,
-    owned: &OwnedTasks<A>,
 ) -> ExitStatus {
     inbox.close();
     state.children().request_all(Shutdown::Kill);
-    owned.close();
     close_discarded(inbox, control, Mode::Killing).await;
-    owned.wait().await;
     state.children().wait_all().await;
     state.children().terminal_status(ExitReason::Killed)
 }
@@ -307,7 +253,6 @@ pub(crate) async fn fail_uninitialized<A: Actor>(
     state: &mut ScopeState<A>,
     inbox: &mut ActorInbox<A>,
     control: &Control,
-    owned: &OwnedTasks<A>,
 ) -> ExitStatus {
     control.begin_failure();
     let reason = match control.mode() {
@@ -318,9 +263,7 @@ pub(crate) async fn fail_uninitialized<A: Actor>(
     };
     inbox.close();
     state.children().request_all(Shutdown::Kill);
-    owned.close();
     close_discarded(inbox, control, control.mode()).await;
-    owned.wait().await;
     state.children().wait_all().await;
     state.children().terminal_status(reason)
 }

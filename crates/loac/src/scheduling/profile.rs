@@ -10,8 +10,8 @@ use crate::{
     transport::{MessageConfig, MessageInbox, MessageSender, NoInbox, NoSender},
 };
 
-use super::{DynamicLimit, FixedLimit, InterleavedState, SerialLane, UnboundedLimit};
-use super::{ScheduledFuture, runtime};
+use super::runtime;
+use super::{DynamicLimit, FixedLimit, ReplyState, UnboundedLimit};
 
 /// A sealed runtime scheduling profile for one actor.
 ///
@@ -27,27 +27,9 @@ use super::{ScheduledFuture, runtime};
     reason = "a private runtime bridge seals reply profiles"
 )]
 pub trait SchedulerProfile<A: Actor>: Send + 'static + Sized {
-    /// Private strategy selected by this profile.
+    /// Private runtime selected by this profile.
     #[doc(hidden)]
-    type Strategy: runtime::SchedulerStrategy<A, Self>;
-}
-
-/// A sealed profile supporting interleaved replies.
-///
-/// [`Serial`] intentionally does not implement this capability.
-#[diagnostic::on_unimplemented(
-    message = "`{A}` cannot schedule interleaved replies",
-    label = "enable `interleaved` in this actor's `#[actor(...)]` configuration"
-)]
-#[allow(
-    private_bounds,
-    private_interfaces,
-    reason = "a private runtime bridge reserves interleaved scheduling"
-)]
-pub trait InterleavedScheduler<A: Actor>: SchedulerProfile<A> {
-    /// Pushes interleaved work through the sealed runtime bridge.
-    #[doc(hidden)]
-    fn __push_interleaved(&mut self, _: runtime::Seal, future: ScheduledFuture);
+    type Runtime: runtime::ProfileRuntime<A, Self>;
 }
 
 /// The scheduler for actors without a mailbox.
@@ -64,13 +46,9 @@ impl Disabled {
     }
 }
 
-/// The scheduler for mailbox actors without interleaving.
-///
-/// Ready replies require no scheduler storage.
-/// Owned replies run on separate Tokio tasks.
+/// Schedules one active reply at a time.
 pub struct Serial<A: Actor> {
-    pub(super) cursor: SerialLane,
-    actor: std::marker::PhantomData<fn() -> A>,
+    pub(super) state: ReplyState<A, FixedLimit<1>>,
 }
 
 impl<A: Actor> Serial<A> {
@@ -78,8 +56,7 @@ impl<A: Actor> Serial<A> {
     #[must_use]
     pub fn new() -> Self {
         Self {
-            cursor: SerialLane::Mailbox,
-            actor: std::marker::PhantomData,
+            state: ReplyState::with_limit(FixedLimit),
         }
     }
 }
@@ -90,9 +67,9 @@ impl<A: Actor> Default for Serial<A> {
     }
 }
 
-/// Schedules at most `N` active interleaved replies.
+/// Schedules at most `N` active handler futures.
 pub struct Fixed<A: Actor, const N: usize> {
-    pub(super) state: InterleavedState<A, FixedLimit<N>>,
+    pub(super) state: ReplyState<A, FixedLimit<N>>,
 }
 
 impl<A: Actor, const N: usize> Fixed<A, N> {
@@ -101,9 +78,9 @@ impl<A: Actor, const N: usize> Fixed<A, N> {
     /// Compilation fails when `N` is zero.
     #[must_use]
     pub fn new() -> Self {
-        const { assert!(N > 0, "interleaved limit must be greater than zero") };
+        const { assert!(N > 0, "handler concurrency must be greater than zero") };
         Self {
-            state: InterleavedState::with_limit(FixedLimit),
+            state: ReplyState::with_limit(FixedLimit),
         }
     }
 }
@@ -114,9 +91,9 @@ impl<A: Actor, const N: usize> Default for Fixed<A, N> {
     }
 }
 
-/// Schedules interleaved replies with a per-spawn limit.
+/// Schedules handler futures with a per-spawn limit.
 pub struct Dynamic<A: Actor> {
-    pub(super) state: InterleavedState<A, DynamicLimit>,
+    pub(super) state: ReplyState<A, DynamicLimit>,
 }
 
 impl<A: Actor> Dynamic<A> {
@@ -124,14 +101,14 @@ impl<A: Actor> Dynamic<A> {
     #[must_use]
     pub fn new(limit: NonZeroUsize) -> Self {
         Self {
-            state: InterleavedState::with_limit(DynamicLimit(limit)),
+            state: ReplyState::with_limit(DynamicLimit(limit)),
         }
     }
 }
 
-/// Schedules interleaved replies without a finite limit.
+/// Schedules handler futures without a finite limit.
 pub struct Unbounded<A: Actor> {
-    pub(super) state: InterleavedState<A, UnboundedLimit>,
+    pub(super) state: ReplyState<A, UnboundedLimit>,
 }
 
 impl<A: Actor> Unbounded<A> {
@@ -139,7 +116,7 @@ impl<A: Actor> Unbounded<A> {
     #[must_use]
     pub fn new() -> Self {
         Self {
-            state: InterleavedState::with_limit(UnboundedLimit),
+            state: ReplyState::with_limit(UnboundedLimit),
         }
     }
 }
@@ -154,7 +131,7 @@ impl<A> SchedulerProfile<A> for Disabled
 where
     A: Actor + MessageConfig<Sender = NoSender, Inbox = NoInbox, Scheduler = Self>,
 {
-    type Strategy = runtime::DisabledStrategy;
+    type Runtime = runtime::DisabledRuntime;
 }
 
 impl<A> SchedulerProfile<A> for Serial<A>
@@ -163,7 +140,7 @@ where
     A::Sender: MessageSender<A>,
     A::Inbox: MessageInbox<A>,
 {
-    type Strategy = runtime::SerialStrategy;
+    type Runtime = runtime::MailboxRuntime;
 }
 
 impl<A, const N: usize> SchedulerProfile<A> for Fixed<A, N>
@@ -172,7 +149,7 @@ where
     A::Sender: MessageSender<A>,
     A::Inbox: MessageInbox<A>,
 {
-    type Strategy = runtime::InterleavedStrategy;
+    type Runtime = runtime::MailboxRuntime;
 }
 
 impl<A> SchedulerProfile<A> for Dynamic<A>
@@ -181,7 +158,7 @@ where
     A::Sender: MessageSender<A>,
     A::Inbox: MessageInbox<A>,
 {
-    type Strategy = runtime::InterleavedStrategy;
+    type Runtime = runtime::MailboxRuntime;
 }
 
 impl<A> SchedulerProfile<A> for Unbounded<A>
@@ -190,38 +167,5 @@ where
     A::Sender: MessageSender<A>,
     A::Inbox: MessageInbox<A>,
 {
-    type Strategy = runtime::InterleavedStrategy;
-}
-
-impl<A, const N: usize> InterleavedScheduler<A> for Fixed<A, N>
-where
-    A: Actor + MessageConfig<Scheduler = Self>,
-    A::Sender: MessageSender<A>,
-    A::Inbox: MessageInbox<A>,
-{
-    fn __push_interleaved(&mut self, _: runtime::Seal, future: ScheduledFuture) {
-        self.state.push_interleaved(future);
-    }
-}
-
-impl<A> InterleavedScheduler<A> for Dynamic<A>
-where
-    A: Actor + MessageConfig<Scheduler = Self>,
-    A::Sender: MessageSender<A>,
-    A::Inbox: MessageInbox<A>,
-{
-    fn __push_interleaved(&mut self, _: runtime::Seal, future: ScheduledFuture) {
-        self.state.push_interleaved(future);
-    }
-}
-
-impl<A> InterleavedScheduler<A> for Unbounded<A>
-where
-    A: Actor + MessageConfig<Scheduler = Self>,
-    A::Sender: MessageSender<A>,
-    A::Inbox: MessageInbox<A>,
-{
-    fn __push_interleaved(&mut self, _: runtime::Seal, future: ScheduledFuture) {
-        self.state.push_interleaved(future);
-    }
+    type Runtime = runtime::MailboxRuntime;
 }

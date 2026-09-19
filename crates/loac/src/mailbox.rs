@@ -7,12 +7,10 @@ use std::{
 use tokio::sync::oneshot;
 
 use crate::{
-    Actor, ActorScope, CallError, DispatchHandler, HasInterleaving, Message, StreamHandler,
-    StreamMessage, StreamOut, Writer,
-    access::Cx,
-    owned::OwnedTasks,
-    reply::sealed::{HandleReply, HandleStreamCall},
-    scheduling::ActorScheduler,
+    Actor, CallError, HasMailbox, Message, StreamHandler, StreamMessage, StreamOut, Writer,
+    access::{Cx, ScopedLease},
+    reply::{CompleteReply, DispatchMessage},
+    scheduling::{ActorScheduler, RuntimeScheduler, ScheduledFuture},
     transport::{ErasedEnvelope, RuntimeInbox},
 };
 
@@ -121,9 +119,8 @@ pub(crate) trait Envelope<A: Actor>: Send {
     /// rejection without invoking user handler code.
     fn dispatch(
         self: Box<Self>,
-        actor: &mut A,
-        scope: &mut ActorScope<'_, A>,
-        owned: &OwnedTasks<A>,
+        cx: Cx<'_, A>,
+        lease: ScopedLease<'_, A>,
         scheduler: &mut ActorScheduler<A>,
         inner: &Arc<ActorInner<A>>,
     );
@@ -135,14 +132,12 @@ pub(crate) trait Envelope<A: Actor>: Send {
 impl<A: Actor> ErasedEnvelope<A> {
     pub(crate) fn dispatch(
         self,
-        actor: &mut A,
-        scope: &mut ActorScope<'_, A>,
-        owned: &OwnedTasks<A>,
+        cx: Cx<'_, A>,
+        lease: ScopedLease<'_, A>,
         scheduler: &mut ActorScheduler<A>,
         inner: &Arc<ActorInner<A>>,
     ) {
-        self.into_envelope()
-            .dispatch(actor, scope, owned, scheduler, inner);
+        self.into_envelope().dispatch(cx, lease, scheduler, inner);
     }
 
     pub(crate) fn discard(self, control: &Control) {
@@ -184,14 +179,14 @@ impl<M: Message> CallEnvelope<M> {
 
 impl<A, M> Envelope<A> for CallEnvelope<M>
 where
-    A: DispatchHandler<M, M::Kind>,
+    A: HasMailbox,
     M: Message,
+    M::Kind: DispatchMessage<A, M>,
 {
     fn dispatch(
         self: Box<Self>,
-        actor: &mut A,
-        scope: &mut ActorScope<'_, A>,
-        owned: &OwnedTasks<A>,
+        cx: Cx<'_, A>,
+        lease: ScopedLease<'_, A>,
         scheduler: &mut ActorScheduler<A>,
         inner: &Arc<ActorInner<A>>,
     ) {
@@ -212,10 +207,9 @@ where
             }
         };
 
-        // The permit commits DuringDispatch before any user code runs,
-        // including synchronous reply construction.
+        // The permit commits DuringDispatch before handler construction.
         let reply = DispatchReply::new(reply, permit);
-        HandleReply::handle(actor.handle(message, scope), owned, scheduler, reply);
+        M::Kind::dispatch(message, cx, lease, scheduler, reply);
     }
 
     fn discard(self: Box<Self>, control: &Control) {
@@ -245,14 +239,14 @@ impl<M: Message<Reply = ()>> SendEnvelope<M> {
 
 impl<A, M> Envelope<A> for SendEnvelope<M>
 where
-    A: DispatchHandler<M, M::Kind>,
+    A: HasMailbox,
     M: Message<Reply = ()>,
+    M::Kind: DispatchMessage<A, M>,
 {
     fn dispatch(
         self: Box<Self>,
-        actor: &mut A,
-        scope: &mut ActorScope<'_, A>,
-        owned: &OwnedTasks<A>,
+        cx: Cx<'_, A>,
+        lease: ScopedLease<'_, A>,
         scheduler: &mut ActorScheduler<A>,
         inner: &Arc<ActorInner<A>>,
     ) {
@@ -265,7 +259,7 @@ where
         // One-way completion still owns a dispatch permit, so panic and Kill
         // use the same state transition as a call even though no result is sent.
         let reply = DispatchReply::one_way(permit);
-        HandleReply::handle(actor.handle(message, scope), owned, scheduler, reply);
+        M::Kind::dispatch(message, cx, lease, scheduler, reply);
     }
 
     fn discard(self: Box<Self>, control: &Control) {
@@ -338,15 +332,14 @@ impl<M: StreamMessage, W> StreamToEnvelope<M, W> {
 
 impl<A, M, W> Envelope<A> for StreamToEnvelope<M, W>
 where
-    A: StreamHandler<M> + HasInterleaving,
+    A: StreamHandler<M>,
     M: StreamMessage,
     W: Writer<M::Item> + Send + 'static,
 {
     fn dispatch(
         self: Box<Self>,
-        actor: &mut A,
-        scope: &mut ActorScope<'_, A>,
-        owned: &OwnedTasks<A>,
+        cx: Cx<'_, A>,
+        lease: ScopedLease<'_, A>,
         scheduler: &mut ActorScheduler<A>,
         inner: &Arc<ActorInner<A>>,
     ) {
@@ -378,13 +371,12 @@ where
             None => DispatchReply::one_way(permit),
         };
 
-        let (cx, lease) = Cx::new(actor, scope);
         let out = StreamOut::new(out);
-        // Dispatch still owns its exclusive actor borrow.
-        // Defer user construction until the first scheduled poll.
-        let future = async move { <A as StreamHandler<M>>::handle(message, out, cx).await };
-        let strategy = crate::reply::CxStream::new(future, lease);
-        HandleStreamCall::<A, M>::handle_stream_call(strategy, owned, scheduler, reply);
+        let future = <A as StreamHandler<M>>::handle(message, out, cx);
+        RuntimeScheduler::push(
+            scheduler,
+            ScheduledFuture::scoped(CompleteReply::new(future, reply.into_scheduled()), lease),
+        );
     }
 
     fn discard(self: Box<Self>, control: &Control) {
@@ -414,16 +406,16 @@ impl<'a, A: Actor, R> DispatchReply<'a, A, R> {
         }
     }
 
-    /// Promotes stack-bound dispatch only when reply work escapes this call.
-    pub(crate) fn into_owned(mut self) -> DispatchReply<'static, A, R> {
+    /// Retains dispatch state for its scheduled handler future.
+    pub(crate) fn into_scheduled(mut self) -> DispatchReply<'static, A, R> {
         let state = std::mem::replace(&mut self.state, DispatchReplyState::Completed);
         let state = match state {
             DispatchReplyState::Caller { reply, permit } => DispatchReplyState::Caller {
                 reply,
-                permit: permit.into_owned(),
+                permit: permit.into_shared(),
             },
             DispatchReplyState::OneWay { permit } => DispatchReplyState::OneWay {
-                permit: permit.into_owned(),
+                permit: permit.into_shared(),
             },
             DispatchReplyState::Completed => {
                 panic!("a completed dispatch reply cannot escape dispatch")
