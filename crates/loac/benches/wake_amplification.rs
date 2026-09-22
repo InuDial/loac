@@ -2,9 +2,8 @@
 //!
 //! Each round keeps `active` handler futures suspended on their own channel.
 //! One command wakes one probe.
-//! The report shows median wake latency, mean handler polls, and the
-//! marginal cost of one pending poll.
-//! The `active = 1` row approximates the exact-wake lower bound.
+//! The report shows median wake latency and mean handler polls.
+//! A directed wake polls one handler at any active count.
 
 use std::{
     future::Future,
@@ -158,19 +157,11 @@ fn main() {
         results
     });
 
-    let (_, (base_elapsed, base_polls)) = results[0];
-    println!("active   wake_us   polls   ns_per_poll");
+    println!("active   wake_ns   polls");
     for (active, (elapsed, polls)) in &results {
-        let extra_polls = polls.saturating_sub(base_polls);
-        let ns_per_poll = if extra_polls == 0 {
-            "-".to_string()
-        } else {
-            let extra_ns = elapsed.saturating_sub(base_elapsed).as_nanos() as f64;
-            format!("{:.0}", extra_ns / extra_polls as f64)
-        };
         println!(
-            "{active:>6} {:>9.1} {polls:>7} {ns_per_poll:>12}",
-            elapsed.as_secs_f64() * 1e6
+            "{active:>6} {:>9.0} {polls:>7}",
+            elapsed.as_secs_f64() * 1e9
         );
     }
 }
