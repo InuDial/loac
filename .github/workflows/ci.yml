@@ -28,5 +28,8 @@ jobs:
       - name: Run tests
         run: cargo test --workspace --locked
 
+      - name: Run tests without debug assertions
+        run: cargo test --workspace --release --locked
+
       - name: Build documentation
         run: cargo doc --workspace --no-deps --locked
