@@ -9,7 +9,7 @@ use std::{
 };
 
 use super::*;
-use crate::{Actor, ActorConfig, ActorScope, Shutdown, mailbox::ActorInner};
+use crate::{Actor, ActorConfig, ActorScope, Shutdown, mailbox::ActorInner, scheduling::ReplyWake};
 
 struct TestActor;
 
@@ -358,9 +358,18 @@ fn leased_self_schedule_wakes_the_task() {
     let actor = test_actor_inner();
     let mut queue = Queue::new();
     let polls = Arc::new(AtomicUsize::new(0));
-    queue.schedule_leased_with(|wake| MarkReadyOnce {
-        polls: Arc::clone(&polls),
-        wake,
+    queue.schedule(|slot| {
+        let wake = ReplyWake::new(slot);
+        wake.acquire_lease_for_test();
+        let waker = wake.waker();
+        ScheduledFuture {
+            future: Box::pin(MarkReadyOnce {
+                polls: Arc::clone(&polls),
+                wake: Arc::clone(&wake),
+            }),
+            wake,
+            waker,
+        }
     });
     let wakes = Arc::new(WakeCounter(AtomicUsize::new(0)));
     let waker = Waker::from(Arc::clone(&wakes));

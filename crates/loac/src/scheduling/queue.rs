@@ -7,9 +7,6 @@ use crate::mailbox::{Control, Mode};
 
 use super::{Lease, ReplySlot, ScheduledFuture};
 
-#[cfg(test)]
-use super::ReplyWake;
-
 const ACTIVE_POLL_BUDGET: usize = 16;
 
 /// Outcome of one reply collection poll.
@@ -97,25 +94,6 @@ impl Queue {
         })
     }
 
-    /// Builds leased work that receives its own wake state.
-    #[cfg(test)]
-    pub(super) fn schedule_leased_with<F, B>(&mut self, build: B) -> DefaultKey
-    where
-        B: FnOnce(Arc<ReplyWake>) -> F,
-        F: std::future::Future<Output = ()> + Send + 'static,
-    {
-        self.schedule(move |slot| {
-            let wake = ReplyWake::new(slot);
-            wake.acquire_lease_for_test();
-            let waker = wake.waker();
-            ScheduledFuture {
-                future: Box::pin(build(Arc::clone(&wake))),
-                wake,
-                waker,
-            }
-        })
-    }
-
     pub(super) fn poll(
         &mut self,
         control: &Control,
@@ -141,7 +119,7 @@ impl Queue {
             self.lease.force_release();
             return ReplyPoll::Progress;
         };
-        if !item.take_ready() {
+        if !item.wake.take_ready() {
             return ReplyPoll::Pending;
         }
 
@@ -157,7 +135,7 @@ impl Queue {
         }
         if held {
             // An in-poll self-schedule must not strand the leased reply.
-            if item.is_ready() {
+            if item.wake.is_ready() {
                 Control::contain_unwind(|| task.waker().wake_by_ref());
             }
             return ReplyPoll::Leased;
@@ -188,7 +166,7 @@ impl Queue {
             let Some(item) = self.items.get_mut(key) else {
                 continue;
             };
-            if !item.take_ready() {
+            if !item.wake.take_ready() {
                 continue;
             }
 

@@ -80,21 +80,9 @@ impl ScheduledFuture {
 
     /// Registers the actor task, then polls with the reply's stable waker.
     fn poll_with_task(&mut self, task: &mut Context<'_>) -> Poll<()> {
-        self.register(task.waker());
+        self.wake.register(task.waker());
         let mut item_task = Context::from_waker(&self.waker);
         self.future.as_mut().poll(&mut item_task)
-    }
-
-    fn take_ready(&self) -> bool {
-        self.wake.take_ready()
-    }
-
-    fn is_ready(&self) -> bool {
-        self.wake.is_ready()
-    }
-
-    fn register(&self, waker: &Waker) {
-        self.wake.register(waker);
     }
 
     /// Wraps ordinary test work with queue-attached wake state.

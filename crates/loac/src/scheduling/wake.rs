@@ -83,7 +83,7 @@ impl ReplyWake {
     ///
     /// A reactor may invoke a retained waker after this reply is gone.
     /// Panic containment keeps that wake from unwinding the reactor.
-    pub(crate) fn wake_task(&self) {
+    fn wake_task(&self) {
         Control::contain_unwind(|| self.task.wake());
     }
 
