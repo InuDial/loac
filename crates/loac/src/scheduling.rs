@@ -20,6 +20,7 @@ mod profile;
 mod queue;
 mod runtime;
 mod state;
+mod wake;
 
 use std::{
     future::Future,
@@ -28,23 +29,20 @@ use std::{
     task::{Context, Poll, Waker},
 };
 
-use crate::{
-    Actor,
-    access::{ReplyWake, ScopedWake},
-};
-
-#[cfg(test)]
-use crate::access::ReplySlot;
+use crate::{Actor, access::ScopedWake};
 
 pub use profile::{Disabled, Dynamic, Fixed, SchedulerProfile, Unbounded};
 pub(crate) use runtime::{ActorScheduler, RuntimeScheduler, SchedulerTurn, TurnContext};
 pub(crate) use state::{
     DynamicLimit, FixedLimit, ReplyLane, ReplyProfile, ReplyState, UnboundedLimit,
 };
+pub(crate) use wake::{Lease, ReplySlot, ReplyWake};
 
 pub(crate) struct ScheduledFuture {
     future: Pin<Box<dyn Future<Output = ()> + Send + 'static>>,
     wake: Arc<ReplyWake>,
+    // One stable waker identity per reply.
+    waker: Waker,
 }
 
 impl ScheduledFuture {
@@ -59,6 +57,7 @@ impl ScheduledFuture {
         F: Future<Output = ()> + Send + 'actor,
     {
         let wake = wake.into_inner();
+        let waker = wake.waker();
         let future: Pin<Box<dyn Future<Output = ()> + Send + 'actor>> = Box::pin(future);
         // SAFETY: actor-scoped futures enter only their actor's scheduler.
         // The actor task is their sole poller and cancellation owner.
@@ -72,23 +71,30 @@ impl ScheduledFuture {
                 Pin<Box<dyn Future<Output = ()> + Send + 'static>>,
             >(future)
         };
-        Self { future, wake }
+        Self {
+            future,
+            wake,
+            waker,
+        }
     }
 
-    fn poll(&mut self, task: &mut Context<'_>) -> Poll<()> {
-        self.future.as_mut().poll(task)
+    /// Registers the actor task, then polls with the reply's stable waker.
+    fn poll_with_task(&mut self, task: &mut Context<'_>) -> Poll<()> {
+        self.register(task.waker());
+        let mut item_task = Context::from_waker(&self.waker);
+        self.future.as_mut().poll(&mut item_task)
     }
 
     fn take_ready(&self) -> bool {
         self.wake.take_ready()
     }
 
-    fn register(&self, waker: &Waker) {
-        self.wake.register(waker);
+    fn is_ready(&self) -> bool {
+        self.wake.is_ready()
     }
 
-    fn waker(&self) -> Waker {
-        self.wake.waker()
+    fn register(&self, waker: &Waker) {
+        self.wake.register(waker);
     }
 
     /// Wraps ordinary test work with queue-attached wake state.
@@ -97,9 +103,12 @@ impl ScheduledFuture {
     where
         F: Future<Output = ()> + Send + 'static,
     {
+        let wake = ReplyWake::new(slot);
+        let waker = wake.waker();
         Self {
             future: Box::pin(future),
-            wake: ReplyWake::new(slot),
+            wake,
+            waker,
         }
     }
 }

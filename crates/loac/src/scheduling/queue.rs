@@ -3,12 +3,12 @@ use std::{sync::Arc, task::Context};
 use crossbeam_queue::SegQueue;
 use slotmap::{DefaultKey, SlotMap};
 
-use crate::{
-    access::{Lease, ReplySlot},
-    mailbox::{Control, Mode},
-};
+use crate::mailbox::{Control, Mode};
 
-use super::ScheduledFuture;
+use super::{Lease, ReplySlot, ScheduledFuture};
+
+#[cfg(test)]
+use super::ReplyWake;
 
 const ACTIVE_POLL_BUDGET: usize = 16;
 
@@ -97,6 +97,25 @@ impl Queue {
         })
     }
 
+    /// Builds leased work that receives its own wake state.
+    #[cfg(test)]
+    pub(super) fn schedule_leased_with<F, B>(&mut self, build: B) -> DefaultKey
+    where
+        B: FnOnce(Arc<ReplyWake>) -> F,
+        F: std::future::Future<Output = ()> + Send + 'static,
+    {
+        self.schedule(move |slot| {
+            let wake = ReplyWake::new(slot);
+            wake.acquire_lease_for_test();
+            let waker = wake.waker();
+            ScheduledFuture {
+                future: Box::pin(build(Arc::clone(&wake))),
+                wake,
+                waker,
+            }
+        })
+    }
+
     pub(super) fn poll(
         &mut self,
         control: &Control,
@@ -126,10 +145,7 @@ impl Queue {
             return ReplyPoll::Pending;
         }
 
-        item.register(task.waker());
-        let waker = item.waker();
-        let mut item_task = Context::from_waker(&waker);
-        let result = item.poll(&mut item_task);
+        let result = item.poll_with_task(task);
         let held = self.lease.held() == Some(key);
 
         if control.mode() != expected_mode {
@@ -140,6 +156,10 @@ impl Queue {
             return ReplyPoll::Progress;
         }
         if held {
+            // An in-poll self-schedule must not strand the leased reply.
+            if item.is_ready() {
+                Control::contain_unwind(|| task.waker().wake_by_ref());
+            }
             return ReplyPoll::Leased;
         }
         ReplyPoll::Progress
@@ -172,16 +192,12 @@ impl Queue {
                 continue;
             }
 
-            item.register(task.waker());
-            let waker = item.waker();
-            let mut item_task = Context::from_waker(&waker);
-            let result = item.poll(&mut item_task);
-            let leased = self.lease.held().is_some();
+            let result = item.poll_with_task(task);
 
             if result.is_ready() {
                 self.complete(key, control);
                 completed = true;
-            } else if leased {
+            } else if self.lease.held().is_some() {
                 return ReplyPoll::Leased;
             }
             polled += 1;

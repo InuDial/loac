@@ -1,8 +1,8 @@
 use std::{marker::PhantomData, num::NonZeroUsize};
 
-use crate::{Actor, access::ReplySlot};
+use crate::Actor;
 
-use super::{Dynamic, Fixed, ScheduledFuture, Unbounded, queue::Queue};
+use super::{Dynamic, Fixed, ReplySlot, ScheduledFuture, Unbounded, queue::Queue};
 
 pub(crate) struct ReplyState<A: Actor, L> {
     pub(super) queue: Queue,

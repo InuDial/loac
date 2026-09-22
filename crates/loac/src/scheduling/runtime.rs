@@ -11,14 +11,14 @@ use std::{
 
 use crate::{
     Actor, ChildExit,
-    access::ReplySlot,
     mailbox::{ActorInbox, ActorInner, Control, Mode},
     runtime::ActorAccess,
     transport::{MessageConfig, MessageInbox, MessageSender, NoInbox, NoSender},
 };
 
 use super::{
-    Disabled, ReplyLane, ReplyProfile, ScheduledFuture, SchedulerProfile, queue::ReplyPoll,
+    Disabled, ReplyLane, ReplyProfile, ReplySlot, ScheduledFuture, SchedulerProfile,
+    queue::ReplyPoll,
 };
 
 pub(crate) type ActorScheduler<A> = <A as MessageConfig>::Scheduler;
