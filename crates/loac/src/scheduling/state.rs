@@ -89,7 +89,12 @@ impl<A: Actor, L: LimitPolicy> ReplyState<A, L> {
 
     pub(crate) fn push(&mut self, future: ScheduledFuture) {
         debug_assert!(self.has_dispatch_capacity());
-        self.queue.push(future);
+        let _ = self.queue.push(future);
+    }
+
+    #[cfg(test)]
+    pub(crate) fn push_leased(&mut self, future: ScheduledFuture) {
+        self.queue.push_leased(future);
     }
 }
 

@@ -17,7 +17,7 @@ use tokio::sync::oneshot;
 use crate::{
     Actor, ActorConfig, ActorRef, ActorScope, ChildExit, Cx, ExitReason, ExitStatus, Handler,
     Message, MessageConfig, Shutdown, ShutdownStatus, SubtreeStatus,
-    access::ScopedLease,
+    access::ScopedWake,
     actor::HasMailbox,
     mailbox::{ActorInbox, ActorInner, Control, Envelope, Mode},
     scheduling::{ActorScheduler, ReplyLane, ReplyProfile, ScheduledFuture},
@@ -308,7 +308,7 @@ impl<A: Actor> Envelope<A> for CountEnvelope {
     fn dispatch(
         self: Box<Self>,
         _cx: Cx<'_, A>,
-        _lease: ScopedLease<'_, A>,
+        _wake: ScopedWake<'_, A>,
         _scheduler: &mut ActorScheduler<A>,
         _inner: &Arc<ActorInner<A>>,
     ) {
@@ -326,7 +326,7 @@ impl Envelope<TestActor> for PanicEnvelope {
     fn dispatch(
         self: Box<Self>,
         _cx: Cx<'_, TestActor>,
-        _lease: ScopedLease<'_, TestActor>,
+        _wake: ScopedWake<'_, TestActor>,
         _scheduler: &mut ActorScheduler<TestActor>,
         _inner: &Arc<ActorInner<TestActor>>,
     ) {
@@ -369,7 +369,7 @@ impl Envelope<TestActor> for ChildKillDropProbe {
     fn dispatch(
         self: Box<Self>,
         _cx: Cx<'_, TestActor>,
-        _lease: ScopedLease<'_, TestActor>,
+        _wake: ScopedWake<'_, TestActor>,
         _scheduler: &mut ActorScheduler<TestActor>,
         _inner: &Arc<ActorInner<TestActor>>,
     ) {
@@ -423,7 +423,7 @@ impl<A: Actor> Envelope<A> for TeardownEnvelope {
     fn dispatch(
         self: Box<Self>,
         _cx: Cx<'_, A>,
-        _lease: ScopedLease<'_, A>,
+        _wake: ScopedWake<'_, A>,
         _scheduler: &mut ActorScheduler<A>,
         _inner: &Arc<ActorInner<A>>,
     ) {

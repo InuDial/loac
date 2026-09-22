@@ -29,32 +29,40 @@ No safe mutable reference survives `Cx::with`.
 ## Lifetime erasure
 
 `Cx::new` borrows `ActorAccess`, not its actor.
-It returns `Cx` and `ScopedLease` together.
+It returns `Cx` and `ScopedWake` together.
 Both values carry the same dispatch lifetime.
 The handler future retains that witness.
 
 [`ScheduledFuture::scoped`](src/scheduling.rs) performs one lifetime transmute.
-The scheduler then owns both future and lease.
+The scheduler then owns both future and wake state.
 The erased lifetime never enters a public type.
 
 Future destructors may call `Cx::with`.
 Scheduler teardown keeps actor storage alive during destruction.
 
+## Directed wakes
+
+Each reply owns one [`ReplyWake`](src/access.rs).
+A wake marks that reply ready, pushes its key once, and wakes the actor task.
+The drain polls exactly the pushed keys.
+Stale keys fail the slot map version check.
+
 ## Scheduler states
 
 | Event | Resulting invariant |
 | --- | --- |
-| Dispatch queues work | The scheduler owns future and lease |
+| Dispatch queues work | The scheduler owns future and wake state |
 | Poll returns `Pending` | No temporary actor borrow remains |
-| Poll acquires a lease | That item remains at the queue front |
+| Poll acquires a lease | The lease slot records that reply key |
 | Leased poll returns `Pending` | Other scheduled actor work pauses |
-| Guard drops | Queue rotation may resume |
+| Guard drops | The lease slot clears |
 | Poll returns `Ready` | Queue removes the item before dropping |
 | Poll panics | Queue retains the item for cleanup |
 | Kill or failure commits | Scheduler clears before actor storage |
 
 Lease acquisition occurs only during scheduler polling.
-Queue insertion therefore always receives an unheld lease.
+Queue insertion therefore always attaches an unheld lease.
+Removal force-releases any forgotten holder.
 
 Graceful `on_shutdown` may run during a held lease.
 It runs between polls after temporary borrows end.
@@ -74,4 +82,4 @@ No concurrent target access occurs.
 | [`runtime/access.rs`](src/runtime/access.rs) | Target remains live and uniquely accessed |
 | [`access.rs`](src/access.rs) | Actor-aware polls remain serialized |
 | [`scheduling.rs`](src/scheduling.rs) | Scheduler drops before actor storage |
-| [`queue.rs`](src/scheduling/queue.rs) | Leased work remains at the front |
+| [`queue.rs`](src/scheduling/queue.rs) | The leased reply is the only polled reply |

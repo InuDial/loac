@@ -149,6 +149,9 @@
 //! Mailbox configuration limits active handler futures.
 //! Omitting `max_in_flight` permits `32` active handlers.
 //! A cx future accesses actor state through [`Cx::with`].
+//! [`Cx::waker`] returns a `Send + Sync` waker for that future.
+//! Waking it polls that handler alone; late wakes are no-ops.
+//! [`Cx::wake`] schedules the current handler directly.
 //! [`Cx::exclusive`] returns a scoped scheduler lease.
 //! All scheduled actor work pauses until that guard drops.
 //! Graceful `on_shutdown` hooks may still preempt the lease.

@@ -7,19 +7,34 @@
 //! The runtime creates one handle per reply.
 //! The actor task polls that reply.
 //! No actor-aware operation overlaps another.
+//!
+//! Each reply owns one wake state.
+//! A wake marks that reply ready and wakes the actor task.
+//! The scheduler drains ready replies without polling the rest.
+//! [`Cx::waker`] shares the same wake state with the handler.
+//!
+//! One actor-wide [`Lease`] backs [`Cx::exclusive`].
+//! The holder records the exclusive reply in one atomic slot.
 
 use std::{
     cell::Cell,
     marker::PhantomData,
     ops::Deref,
+    panic::{self, AssertUnwindSafe},
     sync::{
-        Arc,
-        atomic::{AtomicBool, Ordering},
+        Arc, OnceLock,
+        atomic::{AtomicBool, AtomicU64, Ordering},
     },
+    task::{Wake, Waker},
 };
+
+use crossbeam_queue::SegQueue;
+use futures_util::task::AtomicWaker;
+use slotmap::{DefaultKey, Key, KeyData};
 
 use crate::{
     Actor, ActorRef, ActorScope,
+    mailbox::Control,
     runtime::{ActorAccess, CxTarget},
 };
 
@@ -32,16 +47,16 @@ use crate::{
 /// `Cx` dereferences to [`ActorRef`] for address operations.
 pub struct Cx<'a, A: Actor + 'a> {
     target: CxTarget<A>,
-    lease: Arc<ReplyLease>,
+    reply: Arc<ReplyWake>,
     _lifetime: PhantomData<&'a mut A>,
     // Cx may move with its actor task.
     // It cannot be shared across threads.
     _not_sync: PhantomData<Cell<()>>,
 }
 
-/// Proves that one lease belongs to live actor storage.
-pub(crate) struct ScopedLease<'actor, A: Actor> {
-    lease: Arc<ReplyLease>,
+/// Proves that one reply wake belongs to live actor storage.
+pub(crate) struct ScopedWake<'actor, A: Actor> {
+    wake: Arc<ReplyWake>,
     _lifetime: PhantomData<&'actor A>,
 }
 
@@ -54,6 +69,33 @@ pub(crate) struct ScopedLease<'actor, A: Actor> {
 #[must_use = "dropping the guard releases exclusive scheduling"]
 pub struct ExclusiveGuard<'cx, 'actor, A: Actor> {
     cx: &'cx mut Cx<'actor, A>,
+}
+
+/// Wake state for one scheduled reply.
+///
+/// The waker pushes the reply key once per ready episode.
+/// The scheduler clears the flag before polling the reply.
+/// Duplicate and stale keys are rejected during the drain.
+pub(crate) struct ReplyWake {
+    ready: AtomicBool,
+    entry: OnceLock<QueueEntry>,
+    task: AtomicWaker,
+}
+
+/// Queue coordinates attached before the first poll.
+pub(crate) struct QueueEntry {
+    pub(crate) key: DefaultKey,
+    pub(crate) ready: Arc<SegQueue<DefaultKey>>,
+    pub(crate) lease: Arc<Lease>,
+}
+
+/// The sole actor-wide exclusive lease.
+///
+/// The slot stores the held reply key, or `0` when free.
+/// Debug builds compare and swap; release builds store.
+/// The type also clears the slot when a holder leaves the queue.
+pub(crate) struct Lease {
+    holder: AtomicU64,
 }
 
 impl<A: Actor> ExclusiveGuard<'_, '_, A> {
@@ -72,43 +114,150 @@ impl<A: Actor> ExclusiveGuard<'_, '_, A> {
     }
 }
 
-pub(crate) struct ReplyLease {
-    held: AtomicBool,
-}
-
-impl ReplyLease {
+impl ReplyWake {
     pub(crate) fn new() -> Arc<Self> {
         Arc::new(Self {
-            held: AtomicBool::new(false),
+            ready: AtomicBool::new(false),
+            entry: OnceLock::new(),
+            task: AtomicWaker::new(),
         })
     }
 
-    pub(crate) fn is_held(&self) -> bool {
-        self.held.load(Ordering::Acquire)
+    pub(crate) fn attach(
+        &self,
+        key: DefaultKey,
+        ready: Arc<SegQueue<DefaultKey>>,
+        lease: Arc<Lease>,
+    ) {
+        let _ = self.entry.set(QueueEntry { key, ready, lease });
     }
 
-    #[cfg(test)]
-    /// Acquires a queued lease without constructing a public guard.
-    pub(crate) fn acquire_for_test(&self) {
-        self.acquire();
+    /// Marks one ready episode without waking the actor task.
+    ///
+    /// Dispatch uses this for the implicit first poll.
+    pub(crate) fn mark_ready(&self) {
+        if !self.ready.swap(true, Ordering::AcqRel)
+            && let Some(entry) = self.entry.get()
+        {
+            entry.ready.push(entry.key);
+        }
     }
 
-    fn acquire(&self) {
-        assert!(
-            !self.held.swap(true, Ordering::AcqRel),
-            "a Cx handler cannot hold nested exclusive guards"
-        );
+    /// Marks this reply ready and wakes the actor task.
+    pub(crate) fn notify(&self) {
+        self.mark_ready();
+        self.wake_task();
     }
 
-    fn release(&self) {
-        self.held.store(false, Ordering::Release);
+    /// Wakes the actor task through the registered waker.
+    ///
+    /// A reactor may invoke a retained waker after this reply is gone.
+    /// Panic containment keeps that wake from unwinding the reactor.
+    pub(crate) fn wake_task(&self) {
+        if let Err(payload) = panic::catch_unwind(AssertUnwindSafe(|| self.task.wake())) {
+            Control::discard_panic(payload);
+        }
+    }
+
+    pub(crate) fn take_ready(&self) -> bool {
+        self.ready.swap(false, Ordering::AcqRel)
+    }
+
+    pub(crate) fn register(&self, waker: &Waker) {
+        self.task.register(waker);
+    }
+
+    pub(crate) fn waker(self: &Arc<Self>) -> Waker {
+        Waker::from(Arc::clone(self))
+    }
+
+    fn acquire_lease(&self) {
+        let entry = self
+            .entry
+            .get()
+            .expect("a polled reply owns its queue entry");
+        entry.lease.acquire(entry.key);
+    }
+
+    fn release_lease(&self) {
+        if let Some(entry) = self.entry.get() {
+            entry.lease.release(entry.key);
+        }
     }
 }
 
-impl<A: Actor> ScopedLease<'_, A> {
+impl Wake for ReplyWake {
+    fn wake(self: Arc<Self>) {
+        self.notify();
+    }
+
+    fn wake_by_ref(self: &Arc<Self>) {
+        self.notify();
+    }
+}
+
+impl Lease {
+    pub(crate) fn new() -> Arc<Self> {
+        Arc::new(Self {
+            holder: AtomicU64::new(0),
+        })
+    }
+
+    /// Records one exclusive holder.
+    ///
+    /// Only the actor task reaches this path.
+    /// While a lease is held, no other reply is polled.
+    /// The guard's `&mut Cx` borrow forbids nested guards.
+    fn acquire(&self, key: DefaultKey) {
+        let ffi = key.data().as_ffi();
+        #[cfg(debug_assertions)]
+        self.holder
+            .compare_exchange(0, ffi, Ordering::AcqRel, Ordering::Acquire)
+            .expect("a Cx handler cannot hold nested exclusive guards");
+        #[cfg(not(debug_assertions))]
+        self.holder.store(ffi, Ordering::Release);
+    }
+
+    /// Clears the slot when it still holds `key`.
+    fn release(&self, key: DefaultKey) {
+        let ffi = key.data().as_ffi();
+        #[cfg(debug_assertions)]
+        {
+            match self
+                .holder
+                .compare_exchange(ffi, 0, Ordering::AcqRel, Ordering::Acquire)
+            {
+                Ok(_) | Err(0) => {}
+                Err(holder) => panic!("lease holder mismatch: {holder:#x}"),
+            }
+        }
+        #[cfg(not(debug_assertions))]
+        self.holder.store(0, Ordering::Release);
+    }
+
+    /// Clears the slot after its holder leaves the queue.
+    ///
+    /// Completion, cancellation, and a forgotten guard all end here.
+    pub(crate) fn force_release(&self) {
+        self.holder.store(0, Ordering::Release);
+    }
+
+    /// Returns the exclusive reply key, if any.
+    pub(crate) fn held(&self) -> Option<DefaultKey> {
+        let ffi = self.holder.load(Ordering::Acquire);
+        (ffi != 0).then(|| DefaultKey::from(KeyData::from_ffi(ffi)))
+    }
+
+    #[cfg(test)]
+    pub(crate) fn acquire_for_test(&self, key: DefaultKey) {
+        self.acquire(key);
+    }
+}
+
+impl<A: Actor> ScopedWake<'_, A> {
     /// Consumes the witness after scheduler ownership becomes established.
-    pub(crate) fn into_inner(self) -> Arc<ReplyLease> {
-        self.lease
+    pub(crate) fn into_inner(self) -> Arc<ReplyWake> {
+        self.wake
     }
 }
 
@@ -116,19 +265,19 @@ impl<'actor, A: Actor> Cx<'actor, A> {
     /// Creates paired access and liveness proof for one dispatch.
     ///
     /// This operation never borrows the stored actor.
-    pub(crate) fn new(owner: &'actor mut ActorAccess<A>) -> (Self, ScopedLease<'actor, A>) {
-        let lease = ReplyLease::new();
-        let scoped_lease = ScopedLease {
-            lease: Arc::clone(&lease),
+    pub(crate) fn new(owner: &'actor mut ActorAccess<A>) -> (Self, ScopedWake<'actor, A>) {
+        let reply = ReplyWake::new();
+        let scoped_wake = ScopedWake {
+            wake: Arc::clone(&reply),
             _lifetime: PhantomData,
         };
         let cx = Cx {
             target: owner.target(),
-            lease,
+            reply,
             _lifetime: PhantomData,
             _not_sync: PhantomData,
         };
-        (cx, scoped_lease)
+        (cx, scoped_wake)
     }
 
     /// Runs `f` with temporary `&mut A` and [`ActorScope`] borrows.
@@ -153,14 +302,32 @@ impl<'actor, A: Actor> Cx<'actor, A> {
         unsafe { self.target.actor_ref() }
     }
 
+    /// Returns a waker for this handler future.
+    ///
+    /// The waker is `Send + Sync` and stays valid after completion.
+    /// Later wakes become no-ops once the reply leaves the queue.
+    /// Waking schedules one poll of this handler alone.
+    #[must_use]
+    pub fn waker(&self) -> Waker {
+        self.reply.waker()
+    }
+
+    /// Schedules this handler future for another poll.
+    ///
+    /// This is shorthand for waking [`Cx::waker`].
+    /// External callers clone the waker instead.
+    pub fn wake(&self) {
+        self.reply.notify();
+    }
+
     /// Pauses scheduled actor work until the returned guard drops.
     ///
     /// Acquisition is immediate during the current handler poll.
-    /// A retained guard pins this scheduler item.
+    /// A retained guard pauses every other scheduled reply.
     /// Graceful [`Actor::on_shutdown`] may preempt this lease.
     /// Use [`ExclusiveGuard::with`] for temporary state access.
     pub fn exclusive<'cx>(&'cx mut self) -> ExclusiveGuard<'cx, 'actor, A> {
-        self.lease.acquire();
+        self.reply.acquire_lease();
         ExclusiveGuard { cx: self }
     }
 }
@@ -175,7 +342,9 @@ impl<A: Actor> Deref for Cx<'_, A> {
 
 impl<A: Actor> Drop for ExclusiveGuard<'_, '_, A> {
     fn drop(&mut self) {
-        self.cx.lease.release();
+        // Release is always observed in the same poll.
+        // Waking here would consume the registered task waker.
+        self.cx.reply.release_lease();
     }
 }
 

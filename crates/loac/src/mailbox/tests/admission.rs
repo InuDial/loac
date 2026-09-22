@@ -12,7 +12,7 @@ use tokio::sync::oneshot;
 
 use crate::{
     Actor, ActorConfig, ActorScope, CallError, Cx, ExitReason, Handler, Message, Shutdown,
-    ShutdownStatus, access::ScopedLease, scheduling::ActorScheduler, transport::MessageSender,
+    ShutdownStatus, access::ScopedWake, scheduling::ActorScheduler, transport::MessageSender,
 };
 
 use super::super::{ActorInbox, ActorInner, CallEnvelope, Control, Envelope, Mode};
@@ -46,7 +46,7 @@ impl<A: Actor> Envelope<A> for NoopEnvelope {
     fn dispatch(
         self: Box<Self>,
         _cx: Cx<'_, A>,
-        _lease: ScopedLease<'_, A>,
+        _wake: ScopedWake<'_, A>,
         _scheduler: &mut ActorScheduler<A>,
         _inner: &Arc<ActorInner<A>>,
     ) {
@@ -68,7 +68,7 @@ impl Envelope<UnboundedTestActor> for PanicDropEnvelope {
     fn dispatch(
         self: Box<Self>,
         _cx: Cx<'_, UnboundedTestActor>,
-        _lease: ScopedLease<'_, UnboundedTestActor>,
+        _wake: ScopedWake<'_, UnboundedTestActor>,
         _scheduler: &mut ActorScheduler<UnboundedTestActor>,
         _inner: &Arc<ActorInner<UnboundedTestActor>>,
     ) {

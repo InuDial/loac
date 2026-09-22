@@ -26,12 +26,12 @@ use std::{
     panic::{self, AssertUnwindSafe},
     pin::Pin,
     sync::Arc,
-    task::{Context, Poll},
+    task::{Context, Poll, Waker},
 };
 
 use crate::{
     Actor,
-    access::{ReplyLease, ScopedLease},
+    access::{ReplyWake, ScopedWake},
     mailbox::Control,
 };
 
@@ -43,46 +43,54 @@ pub(crate) use state::{
 
 pub(crate) struct ScheduledFuture {
     future: Pin<Box<dyn Future<Output = ()> + Send + 'static>>,
-    lease: Arc<ReplyLease>,
+    wake: Arc<ReplyWake>,
 }
 
 impl ScheduledFuture {
     /// Erases one actor-scoped future after establishing its runtime owner.
     ///
-    /// The scheduler owns both the future and its lease afterward.
+    /// The scheduler owns both the future and its wake state afterward.
     /// Keeping them together makes their cancellation order explicit.
     #[allow(unsafe_code)]
-    pub(crate) fn scoped<'actor, A, F>(future: F, lease: ScopedLease<'actor, A>) -> Self
+    pub(crate) fn scoped<'actor, A, F>(future: F, wake: ScopedWake<'actor, A>) -> Self
     where
         A: Actor,
         F: Future<Output = ()> + Send + 'actor,
     {
-        let lease = lease.into_inner();
+        let wake = wake.into_inner();
         let future: Pin<Box<dyn Future<Output = ()> + Send + 'actor>> = Box::pin(future);
         // SAFETY: actor-scoped futures enter only their actor's scheduler.
         // The actor task is their sole poller and cancellation owner.
         // RunningActor drops its scheduler before its pinned actor storage.
         // Cx exposes actor borrows only through higher-ranked closures.
         // Handler construction never receives a mutable actor reference.
-        // The paired lease serializes every actor-aware future poll.
+        // Only one woken reply is polled at a time.
         let future = unsafe {
             std::mem::transmute::<
                 Pin<Box<dyn Future<Output = ()> + Send + 'actor>>,
                 Pin<Box<dyn Future<Output = ()> + Send + 'static>>,
             >(future)
         };
-        Self { future, lease }
+        Self { future, wake }
     }
 
     fn poll(&mut self, task: &mut Context<'_>) -> Poll<()> {
         self.future.as_mut().poll(task)
     }
 
-    fn is_leased(&self) -> bool {
-        self.lease.is_held()
+    fn take_ready(&self) -> bool {
+        self.wake.take_ready()
     }
 
-    /// Wraps ordinary test work with an inactive lease.
+    fn register(&self, waker: &Waker) {
+        self.wake.register(waker);
+    }
+
+    fn waker(&self) -> Waker {
+        self.wake.waker()
+    }
+
+    /// Wraps ordinary test work with an unattached wake state.
     #[cfg(test)]
     pub(crate) fn test<F>(future: F) -> Self
     where
@@ -90,22 +98,8 @@ impl ScheduledFuture {
     {
         Self {
             future: Box::pin(future),
-            lease: ReplyLease::new(),
+            wake: ReplyWake::new(),
         }
-    }
-
-    /// Wraps test work with a lease acquired after queue insertion.
-    #[cfg(test)]
-    pub(crate) fn test_scoped<F>(future: F) -> (Self, Arc<ReplyLease>)
-    where
-        F: Future<Output = ()> + Send + 'static,
-    {
-        let lease = ReplyLease::new();
-        let scheduled = Self {
-            future: Box::pin(future),
-            lease: Arc::clone(&lease),
-        };
-        (scheduled, lease)
     }
 }
 

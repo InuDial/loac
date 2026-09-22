@@ -27,14 +27,95 @@ fn test_actor_inner() -> Arc<ActorInner<TestActor>> {
     ActorInner::open(&options).0
 }
 
-struct PollCounter(Arc<AtomicUsize>);
+fn poll_queue(queue: &mut Queue, control: &Control, waker: &Waker) -> ReplyPoll {
+    let mut task = Context::from_waker(waker);
+    queue.poll(control, Mode::Running, &mut task)
+}
+
+struct PollCounter {
+    polls: Arc<AtomicUsize>,
+    completes: bool,
+}
 
 impl Future for PollCounter {
     type Output = ();
 
-    fn poll(self: Pin<&mut Self>, _task: &mut Context<'_>) -> Poll<Self::Output> {
-        self.0.fetch_add(1, Ordering::SeqCst);
+    fn poll(self: Pin<&mut Self>, _task: &mut Context<'_>) -> Poll<()> {
+        self.polls.fetch_add(1, Ordering::SeqCst);
+        if self.completes {
+            Poll::Ready(())
+        } else {
+            Poll::Pending
+        }
+    }
+}
+
+struct SelfWakeOnce {
+    polls: Arc<AtomicUsize>,
+    woken: bool,
+}
+
+impl Future for SelfWakeOnce {
+    type Output = ();
+
+    fn poll(mut self: Pin<&mut Self>, task: &mut Context<'_>) -> Poll<()> {
+        self.polls.fetch_add(1, Ordering::SeqCst);
+        if self.woken {
+            return Poll::Ready(());
+        }
+        self.woken = true;
+        task.waker().wake_by_ref();
         Poll::Pending
+    }
+}
+
+struct CaptureWaker {
+    waker: Arc<Mutex<Option<Waker>>>,
+}
+
+impl Future for CaptureWaker {
+    type Output = ();
+
+    fn poll(self: Pin<&mut Self>, task: &mut Context<'_>) -> Poll<()> {
+        *self.waker.lock().unwrap() = Some(task.waker().clone());
+        Poll::Pending
+    }
+}
+
+struct KillOnPoll {
+    actor: Arc<ActorInner<TestActor>>,
+    polls: Arc<AtomicUsize>,
+}
+
+impl Future for KillOnPoll {
+    type Output = ();
+
+    fn poll(self: Pin<&mut Self>, _task: &mut Context<'_>) -> Poll<()> {
+        self.polls.fetch_add(1, Ordering::SeqCst);
+        self.actor.control.request(Shutdown::Kill);
+        Poll::Pending
+    }
+}
+
+struct ReadyWithPanickingDrop {
+    drops: Arc<AtomicUsize>,
+    dropped_while_unwinding: Arc<AtomicBool>,
+}
+
+impl Future for ReadyWithPanickingDrop {
+    type Output = ();
+
+    fn poll(self: Pin<&mut Self>, _task: &mut Context<'_>) -> Poll<()> {
+        Poll::Ready(())
+    }
+}
+
+impl Drop for ReadyWithPanickingDrop {
+    fn drop(&mut self) {
+        self.drops.fetch_add(1, Ordering::SeqCst);
+        self.dropped_while_unwinding
+            .store(std::thread::panicking(), Ordering::SeqCst);
+        panic!("intentional future drop panic");
     }
 }
 
@@ -50,34 +131,7 @@ impl Wake for WakeCounter {
     }
 }
 
-struct CaptureWaker {
-    polls: Arc<AtomicUsize>,
-    waker: Arc<Mutex<Option<Waker>>>,
-}
-
-impl Future for CaptureWaker {
-    type Output = ();
-
-    fn poll(self: Pin<&mut Self>, task: &mut Context<'_>) -> Poll<Self::Output> {
-        self.polls.fetch_add(1, Ordering::SeqCst);
-        *self.waker.lock().unwrap() = Some(task.waker().clone());
-        Poll::Pending
-    }
-}
-
-struct NotifyFlag(AtomicBool);
-
 struct PanicWake;
-
-impl Wake for NotifyFlag {
-    fn wake(self: Arc<Self>) {
-        self.0.store(true, Ordering::SeqCst);
-    }
-
-    fn wake_by_ref(self: &Arc<Self>) {
-        self.0.store(true, Ordering::SeqCst);
-    }
-}
 
 impl Wake for PanicWake {
     fn wake(self: Arc<Self>) {
@@ -89,264 +143,309 @@ impl Wake for PanicWake {
     }
 }
 
-struct IndexedPoll {
-    index: usize,
-    polls: Arc<Vec<AtomicUsize>>,
-    completes: bool,
-}
-
-impl Future for IndexedPoll {
-    type Output = ();
-
-    fn poll(self: Pin<&mut Self>, _task: &mut Context<'_>) -> Poll<Self::Output> {
-        self.polls[self.index].fetch_add(1, Ordering::SeqCst);
-        if self.completes {
-            Poll::Ready(())
-        } else {
-            Poll::Pending
-        }
-    }
-}
-
-struct PanicOnPoll {
-    dropped: Arc<AtomicBool>,
-    dropped_while_unwinding: Arc<AtomicBool>,
-}
-
-struct ReadyWithPanickingDrop {
-    drops: Arc<AtomicUsize>,
-    dropped_while_unwinding: Arc<AtomicBool>,
-}
-
-impl Future for ReadyWithPanickingDrop {
-    type Output = ();
-
-    fn poll(self: Pin<&mut Self>, _task: &mut Context<'_>) -> Poll<Self::Output> {
-        Poll::Ready(())
-    }
-}
-
-impl Drop for ReadyWithPanickingDrop {
-    fn drop(&mut self) {
-        self.drops.fetch_add(1, Ordering::SeqCst);
-        self.dropped_while_unwinding
-            .store(std::thread::panicking(), Ordering::SeqCst);
-        panic!("intentional future drop panic");
-    }
-}
-
-impl Future for PanicOnPoll {
-    type Output = ();
-
-    fn poll(self: Pin<&mut Self>, _task: &mut Context<'_>) -> Poll<Self::Output> {
-        panic!("intentional future poll panic")
-    }
-}
-
-impl Drop for PanicOnPoll {
-    fn drop(&mut self) {
-        self.dropped.store(true, Ordering::SeqCst);
-        self.dropped_while_unwinding
-            .store(std::thread::panicking(), Ordering::SeqCst);
-    }
-}
-
-struct KillOnPoll {
-    actor: Arc<ActorInner<TestActor>>,
-    polls: Arc<AtomicUsize>,
-}
-
-impl Future for KillOnPoll {
-    type Output = ();
-
-    fn poll(self: Pin<&mut Self>, _task: &mut Context<'_>) -> Poll<Self::Output> {
-        self.polls.fetch_add(1, Ordering::SeqCst);
-        self.actor.control.request(Shutdown::Kill);
-        Poll::Pending
-    }
-}
-
-type TestFuture = Pin<Box<dyn Future<Output = ()> + Send>>;
-
-fn poll_futures(
-    items: &mut VecDeque<TestFuture>,
-    sweep: &mut SweepState,
-    control: &Control,
-    task: &mut Context<'_>,
-) -> ReplyPoll {
-    poll_round_robin(
-        items,
-        sweep,
-        control,
-        Mode::Running,
-        task,
-        |future, task| future.as_mut().poll(task),
-        |_| false,
-    )
-}
-
 #[test]
-fn empty_poll_keeps_the_sweep_unallocated() {
+fn empty_poll_is_pending() {
     let actor = test_actor_inner();
-    let mut items = VecDeque::new();
-    let mut sweep = SweepState::default();
-    let mut task = Context::from_waker(Waker::noop());
+    let mut queue = Queue::new();
 
     assert_eq!(
-        poll_futures(&mut items, &mut sweep, &actor.control, &mut task),
+        poll_queue(&mut queue, &actor.control, Waker::noop()),
         ReplyPoll::Pending
     );
-    assert!(sweep.wake.is_none());
+    assert!(queue.is_empty());
 }
 
 #[test]
-fn polling_allocates_the_sweep_until_the_queue_empties() {
+fn push_marks_only_the_first_poll_ready() {
     let actor = test_actor_inner();
+    let mut queue = Queue::new();
     let polls = Arc::new(AtomicUsize::new(0));
-    let mut items = VecDeque::from([Box::pin(PollCounter(Arc::clone(&polls))) as TestFuture]);
-    let mut sweep = SweepState::default();
-    let mut task = Context::from_waker(Waker::noop());
+    queue.push(ScheduledFuture::test(PollCounter {
+        polls: Arc::clone(&polls),
+        completes: false,
+    }));
 
     assert_eq!(
-        poll_futures(&mut items, &mut sweep, &actor.control, &mut task),
+        poll_queue(&mut queue, &actor.control, Waker::noop()),
         ReplyPoll::Pending
     );
-    let wake = Arc::downgrade(
-        sweep
-            .wake
-            .as_ref()
-            .expect("pending work needs a sweep waker"),
-    );
+    assert_eq!(polls.load(Ordering::SeqCst), 1);
 
-    items.clear();
     assert_eq!(
-        poll_futures(&mut items, &mut sweep, &actor.control, &mut task),
+        poll_queue(&mut queue, &actor.control, Waker::noop()),
         ReplyPoll::Pending
     );
-    assert!(sweep.wake.is_none());
-    assert!(wake.upgrade().is_none());
+    assert_eq!(polls.load(Ordering::SeqCst), 1);
 }
 
 #[test]
-fn proxy_contains_actor_task_wake_panic() {
+fn wake_pushes_one_key_per_ready_episode() {
     let actor = test_actor_inner();
-    let polls = Arc::new(AtomicUsize::new(0));
-    let proxy = Arc::new(Mutex::new(None));
-    let mut items = VecDeque::from([Box::pin(CaptureWaker {
-        polls,
-        waker: Arc::clone(&proxy),
-    }) as TestFuture]);
-    let mut sweep = SweepState::default();
-    let waker = Waker::from(Arc::new(PanicWake));
-    let mut task = Context::from_waker(&waker);
+    let mut queue = Queue::new();
+    let retained = Arc::new(Mutex::new(None));
+    queue.push(ScheduledFuture::test(CaptureWaker {
+        waker: Arc::clone(&retained),
+    }));
+    let wakes = Arc::new(WakeCounter(AtomicUsize::new(0)));
+    let waker = Waker::from(Arc::clone(&wakes));
 
     assert_eq!(
-        poll_futures(&mut items, &mut sweep, &actor.control, &mut task),
+        poll_queue(&mut queue, &actor.control, &waker),
         ReplyPoll::Pending
     );
-    proxy
+    let retained = retained
         .lock()
         .unwrap()
-        .as_ref()
-        .expect("the future captured its proxy waker")
-        .wake_by_ref();
+        .clone()
+        .expect("the future captured its waker");
+
+    retained.wake_by_ref();
+    retained.wake_by_ref();
+
+    // The first wake consumes the registered task waker.
+    // Both calls collapse into one queued key.
+    assert_eq!(wakes.0.load(Ordering::SeqCst), 1);
+    assert_eq!(queue.ready.len(), 1);
+
+    assert_eq!(
+        poll_queue(&mut queue, &actor.control, &waker),
+        ReplyPoll::Pending
+    );
+    assert_eq!(queue.ready.len(), 0);
 }
 
 #[test]
-fn budget_continuation_contains_actor_task_wake_panic() {
+fn budget_truncates_then_self_wakes() {
     let actor = test_actor_inner();
-    let mut items = (0..=ACTIVE_POLL_BUDGET)
-        .map(|_| Box::pin(std::future::pending()) as TestFuture)
-        .collect();
-    let mut sweep = SweepState::default();
-    let waker = Waker::from(Arc::new(PanicWake));
-    let mut task = Context::from_waker(&waker);
+    let mut queue = Queue::new();
+    let polls = Arc::new(AtomicUsize::new(0));
+    for _ in 0..(ACTIVE_POLL_BUDGET + 4) {
+        queue.push(ScheduledFuture::test(PollCounter {
+            polls: Arc::clone(&polls),
+            completes: false,
+        }));
+    }
+    let wakes = Arc::new(WakeCounter(AtomicUsize::new(0)));
+    let waker = Waker::from(Arc::clone(&wakes));
 
     assert_eq!(
-        poll_futures(&mut items, &mut sweep, &actor.control, &mut task),
+        poll_queue(&mut queue, &actor.control, &waker),
         ReplyPoll::BudgetExhausted
+    );
+    assert_eq!(polls.load(Ordering::SeqCst), ACTIVE_POLL_BUDGET);
+    assert_eq!(wakes.0.load(Ordering::SeqCst), 1);
+
+    assert_eq!(
+        poll_queue(&mut queue, &actor.control, &waker),
+        ReplyPoll::Pending
+    );
+    assert_eq!(polls.load(Ordering::SeqCst), ACTIVE_POLL_BUDGET + 4);
+    assert_eq!(wakes.0.load(Ordering::SeqCst), 1);
+}
+
+#[test]
+fn wake_during_poll_is_drained_in_the_same_turn() {
+    let actor = test_actor_inner();
+    let mut queue = Queue::new();
+    let polls = Arc::new(AtomicUsize::new(0));
+    queue.push(ScheduledFuture::test(SelfWakeOnce {
+        polls: Arc::clone(&polls),
+        woken: false,
+    }));
+
+    // The self-wake pushes a fresh key that the same drain consumes.
+    assert_eq!(
+        poll_queue(&mut queue, &actor.control, Waker::noop()),
+        ReplyPoll::Progress
+    );
+    assert!(queue.is_empty());
+    assert_eq!(polls.load(Ordering::SeqCst), 2);
+}
+
+#[test]
+fn stale_keys_are_skipped() {
+    let actor = test_actor_inner();
+    let mut queue = Queue::new();
+    let key = queue.push(ScheduledFuture::test(async {}));
+
+    assert_eq!(
+        poll_queue(&mut queue, &actor.control, Waker::noop()),
+        ReplyPoll::Progress
+    );
+    queue.ready.push(key);
+
+    assert_eq!(
+        poll_queue(&mut queue, &actor.control, Waker::noop()),
+        ReplyPoll::Pending
     );
 }
 
 #[test]
-fn confirmation_wake_contains_actor_task_wake_panic() {
+fn a_lease_pauses_every_other_reply() {
     let actor = test_actor_inner();
-    let retained = Arc::new(Mutex::new(None));
-    let mut items = VecDeque::from([Box::pin(CaptureWaker {
-        polls: Arc::new(AtomicUsize::new(0)),
-        waker: Arc::clone(&retained),
-    }) as TestFuture]);
-    for _ in 1..20 {
-        items.push_back(Box::pin(std::future::pending()));
-    }
-    let mut sweep = SweepState::default();
-    let mut first_task = Context::from_waker(Waker::noop());
+    let mut queue = Queue::new();
+    let leased_polls = Arc::new(AtomicUsize::new(0));
+    queue.push_leased(ScheduledFuture::test(PollCounter {
+        polls: Arc::clone(&leased_polls),
+        completes: false,
+    }));
+    let other_polls = Arc::new(AtomicUsize::new(0));
+    queue.push(ScheduledFuture::test(PollCounter {
+        polls: Arc::clone(&other_polls),
+        completes: true,
+    }));
+    assert!(queue.is_leased());
 
     assert_eq!(
-        poll_futures(&mut items, &mut sweep, &actor.control, &mut first_task),
-        ReplyPoll::BudgetExhausted
+        poll_queue(&mut queue, &actor.control, Waker::noop()),
+        ReplyPoll::Leased
+    );
+    assert_eq!(leased_polls.load(Ordering::SeqCst), 1);
+    assert_eq!(other_polls.load(Ordering::SeqCst), 0);
+
+    assert_eq!(
+        poll_queue(&mut queue, &actor.control, Waker::noop()),
+        ReplyPoll::Pending
+    );
+    assert_eq!(other_polls.load(Ordering::SeqCst), 0);
+
+    queue.lease.force_release();
+    assert_eq!(
+        poll_queue(&mut queue, &actor.control, Waker::noop()),
+        ReplyPoll::Progress
+    );
+    assert_eq!(other_polls.load(Ordering::SeqCst), 1);
+    // The released reply remains parked until it is woken again.
+    assert_eq!(queue.len(), 1);
+}
+
+#[test]
+fn completing_the_leased_reply_releases_the_slot() {
+    let actor = test_actor_inner();
+    let mut queue = Queue::new();
+    queue.push_leased(ScheduledFuture::test(async {}));
+
+    assert_eq!(
+        poll_queue(&mut queue, &actor.control, Waker::noop()),
+        ReplyPoll::Progress
+    );
+    assert!(!queue.is_leased());
+    assert!(queue.is_empty());
+}
+
+#[test]
+fn kill_committed_by_one_reply_stops_the_drain() {
+    let actor = test_actor_inner();
+    let mut queue = Queue::new();
+    let first_polls = Arc::new(AtomicUsize::new(0));
+    let second_polls = Arc::new(AtomicUsize::new(0));
+    queue.push(ScheduledFuture::test(KillOnPoll {
+        actor: Arc::clone(&actor),
+        polls: Arc::clone(&first_polls),
+    }));
+    queue.push(ScheduledFuture::test(PollCounter {
+        polls: Arc::clone(&second_polls),
+        completes: true,
+    }));
+
+    assert_eq!(
+        poll_queue(&mut queue, &actor.control, Waker::noop()),
+        ReplyPoll::Progress
+    );
+    assert_eq!(first_polls.load(Ordering::SeqCst), 1);
+    assert_eq!(second_polls.load(Ordering::SeqCst), 0);
+    assert_eq!(actor.control.mode(), Mode::Killing);
+}
+
+#[test]
+fn wake_contains_actor_task_waker_panic() {
+    let actor = test_actor_inner();
+    let mut queue = Queue::new();
+    let retained = Arc::new(Mutex::new(None));
+    queue.push(ScheduledFuture::test(CaptureWaker {
+        waker: Arc::clone(&retained),
+    }));
+    let waker = Waker::from(Arc::new(PanicWake));
+
+    assert_eq!(
+        poll_queue(&mut queue, &actor.control, &waker),
+        ReplyPoll::Pending
     );
     retained
         .lock()
         .unwrap()
         .as_ref()
-        .expect("the first future retained its proxy")
+        .expect("the future captured its waker")
         .wake_by_ref();
+}
 
+#[test]
+fn budget_continuation_contains_actor_task_waker_panic() {
+    let actor = test_actor_inner();
+    let mut queue = Queue::new();
+    for _ in 0..=ACTIVE_POLL_BUDGET {
+        queue.push(ScheduledFuture::test(std::future::pending::<()>()));
+    }
     let waker = Waker::from(Arc::new(PanicWake));
-    let mut second_task = Context::from_waker(&waker);
+
     assert_eq!(
-        poll_futures(&mut items, &mut sweep, &actor.control, &mut second_task),
-        ReplyPoll::Pending
+        poll_queue(&mut queue, &actor.control, &waker),
+        ReplyPoll::BudgetExhausted
     );
 }
 
 #[test]
-fn clearing_detaches_a_retained_proxy_waker() {
+fn late_wake_after_clear_is_a_no_op() {
     let actor = test_actor_inner();
-    let polls = Arc::new(AtomicUsize::new(0));
+    let mut queue = Queue::new();
     let retained = Arc::new(Mutex::new(None));
-    let mut items = VecDeque::from([Box::pin(CaptureWaker {
-        polls,
+    queue.push(ScheduledFuture::test(CaptureWaker {
         waker: Arc::clone(&retained),
-    }) as TestFuture]);
-    let mut sweep = SweepState::default();
-    let notified = Arc::new(NotifyFlag(AtomicBool::new(false)));
-    let waker = Waker::from(Arc::clone(&notified));
-    let mut task = Context::from_waker(&waker);
+    }));
 
     assert_eq!(
-        poll_futures(&mut items, &mut sweep, &actor.control, &mut task),
+        poll_queue(&mut queue, &actor.control, Waker::noop()),
         ReplyPoll::Pending
     );
-    items.clear();
-    assert_eq!(
-        poll_futures(&mut items, &mut sweep, &actor.control, &mut task),
-        ReplyPoll::Pending
-    );
-
-    retained
+    let retained = retained
         .lock()
         .unwrap()
-        .as_ref()
-        .expect("the external source retains its proxy")
-        .wake_by_ref();
-    assert!(!notified.0.load(Ordering::SeqCst));
+        .clone()
+        .expect("the future captured its waker");
+
+    queue.clear(&actor.control);
+    retained.wake_by_ref();
+
+    assert_eq!(
+        poll_queue(&mut queue, &actor.control, Waker::noop()),
+        ReplyPoll::Pending
+    );
 }
 
 #[test]
-fn clearing_a_sweep_resets_all_state() {
-    let mut sweep = SweepState {
-        remaining: 3,
-        generation: 7,
-        wake: Some(Arc::new(SweepWaker::default())),
-    };
+fn clear_releases_the_lease_and_contains_drops() {
+    let actor = test_actor_inner();
+    let leased_drops = Arc::new(AtomicUsize::new(0));
+    let reply_drops = Arc::new(AtomicUsize::new(0));
+    let dropped_while_unwinding = Arc::new(AtomicBool::new(false));
+    let mut queue = Queue::new();
 
-    sweep.clear();
+    queue.push_leased(ScheduledFuture::test(ReadyWithPanickingDrop {
+        drops: Arc::clone(&leased_drops),
+        dropped_while_unwinding: Arc::clone(&dropped_while_unwinding),
+    }));
+    queue.push(ScheduledFuture::test(ReadyWithPanickingDrop {
+        drops: Arc::clone(&reply_drops),
+        dropped_while_unwinding: Arc::clone(&dropped_while_unwinding),
+    }));
 
-    assert_eq!(sweep.remaining, 0);
-    assert_eq!(sweep.generation, 0);
-    assert!(sweep.wake.is_none());
+    queue.clear(&actor.control);
+
+    assert_eq!(leased_drops.load(Ordering::SeqCst), 1);
+    assert_eq!(reply_drops.load(Ordering::SeqCst), 1);
+    assert!(!dropped_while_unwinding.load(Ordering::SeqCst));
+    assert!(!queue.is_leased());
+    assert!(queue.is_empty());
 }
 
 // Automatic scheduler teardown has no lifecycle handle.
@@ -367,187 +466,4 @@ fn queue_drop_contains_each_future_panic() {
 
     assert_eq!(drops.load(Ordering::SeqCst), 2);
     assert!(!dropped_while_unwinding.load(Ordering::SeqCst));
-}
-
-#[test]
-fn budgeted_scan_resumes_at_the_unpolled_tail() {
-    let actor = test_actor_inner();
-    let polls: Vec<_> = (0..20).map(|_| Arc::new(AtomicUsize::new(0))).collect();
-    let mut items: VecDeque<TestFuture> = polls
-        .iter()
-        .map(|count| Box::pin(PollCounter(Arc::clone(count))) as TestFuture)
-        .collect();
-    let mut sweep = SweepState::default();
-    let wakes = Arc::new(WakeCounter(AtomicUsize::new(0)));
-    let waker = Waker::from(Arc::clone(&wakes));
-    let mut task = Context::from_waker(&waker);
-
-    assert_eq!(
-        poll_futures(&mut items, &mut sweep, &actor.control, &mut task),
-        ReplyPoll::BudgetExhausted
-    );
-    assert!(
-        polls[..ACTIVE_POLL_BUDGET]
-            .iter()
-            .all(|count| count.load(Ordering::SeqCst) == 1)
-    );
-    assert!(
-        polls[ACTIVE_POLL_BUDGET..]
-            .iter()
-            .all(|count| count.load(Ordering::SeqCst) == 0)
-    );
-    assert_eq!(wakes.0.load(Ordering::SeqCst), 1);
-
-    assert_eq!(
-        poll_futures(&mut items, &mut sweep, &actor.control, &mut task),
-        ReplyPoll::Pending
-    );
-    assert!(polls.iter().all(|count| count.load(Ordering::SeqCst) == 1));
-    assert_eq!(wakes.0.load(Ordering::SeqCst), 1);
-}
-
-#[test]
-fn future_wake_coalesced_with_continuation_starts_another_sweep() {
-    let actor = test_actor_inner();
-    let first_polls = Arc::new(AtomicUsize::new(0));
-    let first_waker = Arc::new(Mutex::new(None));
-    let mut items = VecDeque::from([Box::pin(CaptureWaker {
-        polls: Arc::clone(&first_polls),
-        waker: Arc::clone(&first_waker),
-    }) as TestFuture]);
-    for _ in 1..20 {
-        items.push_back(Box::pin(std::future::pending()));
-    }
-    let mut sweep = SweepState::default();
-    let notified = Arc::new(NotifyFlag(AtomicBool::new(false)));
-    let waker = Waker::from(Arc::clone(&notified));
-    let mut task = Context::from_waker(&waker);
-
-    assert_eq!(
-        poll_futures(&mut items, &mut sweep, &actor.control, &mut task),
-        ReplyPoll::BudgetExhausted
-    );
-    first_waker.lock().unwrap().as_ref().unwrap().wake_by_ref();
-    assert!(notified.0.swap(false, Ordering::SeqCst));
-
-    assert_eq!(
-        poll_futures(&mut items, &mut sweep, &actor.control, &mut task),
-        ReplyPoll::Pending
-    );
-    assert!(notified.0.swap(false, Ordering::SeqCst));
-
-    assert_eq!(
-        poll_futures(&mut items, &mut sweep, &actor.control, &mut task),
-        ReplyPoll::BudgetExhausted
-    );
-    assert_eq!(first_polls.load(Ordering::SeqCst), 2);
-}
-
-// Completion at the budget edge must still yield.
-#[test]
-fn completion_at_budget_cut_yields_before_resuming_tail() {
-    let actor = test_actor_inner();
-    let polls = Arc::new((0..17).map(|_| AtomicUsize::new(0)).collect::<Vec<_>>());
-    let mut items: VecDeque<TestFuture> = (0..17)
-        .map(|index| {
-            Box::pin(IndexedPoll {
-                index,
-                polls: Arc::clone(&polls),
-                completes: index == 0,
-            }) as TestFuture
-        })
-        .collect();
-    items.rotate_left(2);
-    let mut sweep = SweepState::default();
-    let wakes = Arc::new(WakeCounter(AtomicUsize::new(0)));
-    let waker = Waker::from(Arc::clone(&wakes));
-    let mut task = Context::from_waker(&waker);
-
-    assert_eq!(
-        poll_futures(&mut items, &mut sweep, &actor.control, &mut task),
-        ReplyPoll::BudgetExhausted
-    );
-    assert_eq!(wakes.0.load(Ordering::SeqCst), 1);
-    assert_eq!(
-        poll_futures(&mut items, &mut sweep, &actor.control, &mut task),
-        ReplyPoll::Pending
-    );
-    assert!(polls.iter().all(|count| count.load(Ordering::SeqCst) == 1));
-}
-
-// A panicking poll must leave its future owned.
-#[test]
-fn poll_panic_retains_the_future_for_contained_cleanup() {
-    let actor = test_actor_inner();
-    let dropped = Arc::new(AtomicBool::new(false));
-    let dropped_while_unwinding = Arc::new(AtomicBool::new(false));
-    let mut items = VecDeque::from([Box::pin(PanicOnPoll {
-        dropped: Arc::clone(&dropped),
-        dropped_while_unwinding: Arc::clone(&dropped_while_unwinding),
-    }) as TestFuture]);
-    let mut sweep = SweepState::default();
-    let mut task = Context::from_waker(Waker::noop());
-
-    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        poll_futures(&mut items, &mut sweep, &actor.control, &mut task)
-    }));
-    assert!(result.is_err());
-    assert!(!dropped.load(Ordering::SeqCst));
-
-    drop(result);
-    actor
-        .control
-        .drop_user_value(items.pop_front().expect("the failed future stays owned"));
-    assert!(dropped.load(Ordering::SeqCst));
-    assert!(!dropped_while_unwinding.load(Ordering::SeqCst));
-}
-
-#[test]
-fn completed_future_drop_panic_is_contained_after_removal() {
-    let actor = test_actor_inner();
-    let drops = Arc::new(AtomicUsize::new(0));
-    let dropped_while_unwinding = Arc::new(AtomicBool::new(false));
-    let mut items = VecDeque::from([Box::pin(ReadyWithPanickingDrop {
-        drops: Arc::clone(&drops),
-        dropped_while_unwinding: Arc::clone(&dropped_while_unwinding),
-    }) as TestFuture]);
-    let mut sweep = SweepState::default();
-    let mut task = Context::from_waker(Waker::noop());
-
-    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        poll_futures(&mut items, &mut sweep, &actor.control, &mut task)
-    }));
-
-    assert!(matches!(result, Ok(ReplyPoll::Progress)));
-    assert!(items.is_empty());
-    assert!(sweep.wake.is_none());
-    assert_eq!(drops.load(Ordering::SeqCst), 1);
-    assert!(!dropped_while_unwinding.load(Ordering::SeqCst));
-    assert_eq!(actor.control.mode(), Mode::Failing);
-}
-
-#[test]
-fn kill_committed_by_one_reply_stops_the_sweep() {
-    let actor = test_actor_inner();
-    let first_polls = Arc::new(AtomicUsize::new(0));
-    let second_polls = Arc::new(AtomicUsize::new(0));
-    let mut items = VecDeque::from([
-        Box::pin(KillOnPoll {
-            actor: Arc::clone(&actor),
-            polls: Arc::clone(&first_polls),
-        }) as TestFuture,
-        Box::pin(PollCounter(Arc::clone(&second_polls))) as TestFuture,
-    ]);
-    let mut sweep = SweepState::default();
-    let wakes = Arc::new(WakeCounter(AtomicUsize::new(0)));
-    let waker = Waker::from(wakes);
-    let mut task = Context::from_waker(&waker);
-
-    assert_eq!(
-        poll_futures(&mut items, &mut sweep, &actor.control, &mut task),
-        ReplyPoll::Progress
-    );
-    assert_eq!(first_polls.load(Ordering::SeqCst), 1);
-    assert_eq!(second_polls.load(Ordering::SeqCst), 0);
-    assert_eq!(actor.control.mode(), Mode::Killing);
 }

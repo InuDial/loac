@@ -6,7 +6,7 @@ use std::{
 
 use crate::{
     Actor, ActorScope, Cx,
-    access::ScopedLease,
+    access::ScopedWake,
     mailbox::{ActorInner, Control, Envelope},
     scheduling::ActorScheduler,
 };
@@ -36,7 +36,7 @@ impl Envelope<TestActor> for ProbeEnvelope {
     fn dispatch(
         self: Box<Self>,
         _cx: Cx<'_, TestActor>,
-        _lease: ScopedLease<'_, TestActor>,
+        _wake: ScopedWake<'_, TestActor>,
         _scheduler: &mut ActorScheduler<TestActor>,
         _inner: &Arc<ActorInner<TestActor>>,
     ) {

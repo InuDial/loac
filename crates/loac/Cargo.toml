@@ -12,6 +12,7 @@ categories = ["asynchronous", "concurrency"]
 autoexamples = false
 
 [dependencies]
+crossbeam-queue = { version = "0.3.14", default-features = false, features = ["std"] }
 futures-util = { version = "0.3.31", default-features = false, features = ["std"] }
 loac-macros = { version = "0.3.0", path = "../loac-macros" }
 pin-project-lite = "0.2.16"

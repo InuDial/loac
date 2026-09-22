@@ -228,8 +228,8 @@ where
                     loop {
                         match turn.inbox.poll_recv(task) {
                             Poll::Ready(Some(envelope)) => {
-                                let (cx, lease) = Cx::new(turn.access);
-                                envelope.dispatch(cx, lease, scheduler, turn.inner);
+                                let (cx, wake) = Cx::new(turn.access);
+                                envelope.dispatch(cx, wake, scheduler, turn.inner);
                                 dispatched += 1;
                             }
                             Poll::Ready(None) => break Some(SchedulerTurn::InboxClosed),

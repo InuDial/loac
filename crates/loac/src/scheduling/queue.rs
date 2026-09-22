@@ -1,16 +1,16 @@
 use std::{
-    collections::VecDeque,
     panic::{self, AssertUnwindSafe},
-    sync::{
-        Arc,
-        atomic::{AtomicUsize, Ordering},
-    },
-    task::{Context, Poll, Wake, Waker},
+    sync::Arc,
+    task::Context,
 };
 
-use futures_util::task::AtomicWaker;
+use crossbeam_queue::SegQueue;
+use slotmap::{DefaultKey, SlotMap};
 
-use crate::mailbox::{Control, Mode};
+use crate::{
+    access::Lease,
+    mailbox::{Control, Mode},
+};
 
 use super::{ScheduledFuture, drop_without_unwind};
 
@@ -19,28 +19,36 @@ const ACTIVE_POLL_BUDGET: usize = 16;
 /// Outcome of one reply collection poll.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(super) enum ReplyPoll {
-    /// No reply completed, and no budget cutoff remains.
+    /// No reply was ready.
     Pending,
     /// A reply completed or lifecycle changed.
     Progress,
     /// One reply holds the scheduler lease.
     Leased,
-    /// The budget ended before the current sweep finished.
+    /// The budget ended with ready keys remaining.
     ///
-    /// The caller must stop polling ready lanes and return [`Poll::Pending`].
+    /// The caller must stop polling and return [`Poll::Pending`].
     BudgetExhausted,
 }
 
+/// Ready-key queue for one actor scheduler.
+///
+/// Items live in a slot map under stable versioned keys.
+/// A wake pushes one key per ready episode.
+/// The drain polls exactly the pushed keys.
+/// The lease slot pauses every other reply while held.
 pub(super) struct Queue {
-    items: VecDeque<ScheduledFuture>,
-    sweep: SweepState,
+    items: SlotMap<DefaultKey, ScheduledFuture>,
+    ready: Arc<SegQueue<DefaultKey>>,
+    lease: Arc<Lease>,
 }
 
 impl Queue {
     pub(super) fn new() -> Self {
         Self {
-            items: VecDeque::new(),
-            sweep: SweepState::default(),
+            items: SlotMap::new(),
+            ready: Arc::new(SegQueue::new()),
+            lease: Lease::new(),
         }
     }
 
@@ -52,14 +60,27 @@ impl Queue {
         self.items.is_empty()
     }
 
-    pub(super) fn push(&mut self, future: ScheduledFuture) {
-        // Lease acquisition happens only while polling a queued future.
-        self.items.push_back(future);
-        self.sweep.restart();
+    pub(super) fn is_leased(&self) -> bool {
+        self.lease.held().is_some()
     }
 
-    pub(super) fn is_leased(&self) -> bool {
-        self.items.front().is_some_and(ScheduledFuture::is_leased)
+    /// Inserts one reply and marks its first poll ready.
+    ///
+    /// Attachment happens before the first poll.
+    /// No waker can escape before the entry exists.
+    pub(super) fn push(&mut self, future: ScheduledFuture) -> DefaultKey {
+        let key = self.items.insert(future);
+        let item = &self.items[key];
+        item.wake
+            .attach(key, Arc::clone(&self.ready), Arc::clone(&self.lease));
+        item.wake.mark_ready();
+        key
+    }
+
+    #[cfg(test)]
+    pub(super) fn push_leased(&mut self, future: ScheduledFuture) {
+        let key = self.push(future);
+        self.lease.acquire_for_test(key);
     }
 
     pub(super) fn poll(
@@ -68,240 +89,136 @@ impl Queue {
         expected_mode: Mode,
         task: &mut Context<'_>,
     ) -> ReplyPoll {
-        if self.is_leased() {
-            return self.poll_leased(control, expected_mode, task);
+        match self.lease.held() {
+            Some(key) => self.poll_leased(key, control, expected_mode, task),
+            None => self.poll_ready(control, expected_mode, task),
         }
-        poll_round_robin(
-            &mut self.items,
-            &mut self.sweep,
-            control,
-            expected_mode,
-            task,
-            ScheduledFuture::poll,
-            ScheduledFuture::is_leased,
-        )
     }
 
+    // While one reply is leased, no other reply runs.
+    // Unrelated ready keys stay queued until release.
     fn poll_leased(
+        &mut self,
+        key: DefaultKey,
+        control: &Control,
+        expected_mode: Mode,
+        task: &mut Context<'_>,
+    ) -> ReplyPoll {
+        let Some(item) = self.items.get_mut(key) else {
+            self.lease.force_release();
+            return ReplyPoll::Progress;
+        };
+        if !item.take_ready() {
+            return ReplyPoll::Pending;
+        }
+
+        item.register(task.waker());
+        let waker = item.waker();
+        let mut item_task = Context::from_waker(&waker);
+        let result = item.poll(&mut item_task);
+        let held = self.lease.held() == Some(key);
+
+        if control.mode() != expected_mode {
+            return ReplyPoll::Progress;
+        }
+        if result.is_ready() {
+            self.complete(key, control);
+            return ReplyPoll::Progress;
+        }
+        if held {
+            return ReplyPoll::Leased;
+        }
+        ReplyPoll::Progress
+    }
+
+    // One drain polls at most ACTIVE_POLL_BUDGET replies.
+    // A truncated drain self-wakes and reports BudgetExhausted.
+    // Ready keys are cleared before their poll.
+    // A wake during that poll pushes a fresh key.
+    fn poll_ready(
         &mut self,
         control: &Control,
         expected_mode: Mode,
         task: &mut Context<'_>,
     ) -> ReplyPoll {
-        let wake = self
-            .sweep
-            .wake
-            .get_or_insert_with(|| Arc::new(SweepWaker::default()));
-        wake.register(task.waker());
-        let item_waker = Waker::from(Arc::clone(wake));
-        let mut item_task = Context::from_waker(&item_waker);
-        let result = self
-            .items
-            .front_mut()
-            .expect("a leased queue retains its owner")
-            .poll(&mut item_task);
-        self.sweep.restart();
+        let mut polled = 0;
+        let mut completed = false;
+
+        while polled < ACTIVE_POLL_BUDGET {
+            if control.mode() != expected_mode {
+                break;
+            }
+            let Some(key) = self.ready.pop() else {
+                break;
+            };
+            let Some(item) = self.items.get_mut(key) else {
+                continue;
+            };
+            if !item.take_ready() {
+                continue;
+            }
+
+            item.register(task.waker());
+            let waker = item.waker();
+            let mut item_task = Context::from_waker(&waker);
+            let result = item.poll(&mut item_task);
+            let leased = self.lease.held().is_some();
+
+            if result.is_ready() {
+                self.complete(key, control);
+                completed = true;
+            } else if leased {
+                return ReplyPoll::Leased;
+            }
+            polled += 1;
+        }
+
         if control.mode() != expected_mode {
             return ReplyPoll::Progress;
         }
-        if result.is_ready() {
-            let completed = self
-                .items
-                .pop_front()
-                .expect("the leased reply just completed");
-            control.drop_user_value(completed);
-            return ReplyPoll::Progress;
+        if !self.ready.is_empty() {
+            // A continuation wake must not unwind the actor task.
+            if let Err(payload) =
+                panic::catch_unwind(AssertUnwindSafe(|| task.waker().wake_by_ref()))
+            {
+                Control::discard_panic(payload);
+            }
+            return ReplyPoll::BudgetExhausted;
         }
-        if self.is_leased() {
-            ReplyPoll::Leased
-        } else {
-            self.items.rotate_left(1);
+        if completed {
             ReplyPoll::Progress
+        } else {
+            ReplyPoll::Pending
+        }
+    }
+
+    /// Removes one reply and releases any forgotten lease.
+    ///
+    /// The lease normally clears when its guard drops.
+    /// A leaked guard would otherwise pause the actor forever.
+    fn complete(&mut self, key: DefaultKey, control: &Control) {
+        if let Some(future) = self.items.remove(key) {
+            control.drop_user_value(future);
+        }
+        if self.lease.held() == Some(key) {
+            self.lease.force_release();
         }
     }
 
     pub(super) fn clear(&mut self, control: &Control) {
-        for future in self.items.drain(..) {
+        for (_, future) in self.items.drain() {
             control.drop_user_value(future);
         }
-        self.sweep.clear();
+        self.lease.force_release();
     }
 }
 
 impl Drop for Queue {
     fn drop(&mut self) {
-        self.sweep.clear();
-        while let Some(future) = self.items.pop_front() {
+        for (_, future) in self.items.drain() {
             drop_without_unwind(future);
         }
-    }
-}
-
-// The deque front is the persistent round-robin cursor.
-// Pending work rotates back. Completed work leaves from the front.
-// An idle state starts one circular sweep.
-// Each call polls at most ACTIVE_POLL_BUDGET items.
-// A truncated sweep self-wakes and returns BudgetExhausted.
-// The deque front and `remaining` preserve its recovery point.
-// A future may complete during that sweep, but the caller must still
-// return Poll::Pending after BudgetExhausted.
-//
-// Every item receives the same proxy waker.
-// Its generation separates future notifications from continuation wakes.
-// A coalesced notification starts one confirmation sweep.
-// This prevents an all-pending collection from spinning.
-//
-// Progress reports completion or lifecycle change.
-// Pending means no work completed and no budget cutoff remains.
-fn poll_round_robin<T>(
-    items: &mut VecDeque<T>,
-    sweep: &mut SweepState,
-    control: &Control,
-    expected_mode: Mode,
-    task: &mut Context<'_>,
-    mut poll: impl FnMut(&mut T, &mut Context<'_>) -> Poll<()>,
-    mut is_leased: impl FnMut(&T) -> bool,
-) -> ReplyPoll {
-    if items.is_empty() {
-        sweep.clear();
-        return ReplyPoll::Pending;
-    }
-
-    let wake = sweep
-        .wake
-        .get_or_insert_with(|| Arc::new(SweepWaker::default()));
-    wake.register(task.waker());
-    let item_waker = Waker::from(Arc::clone(wake));
-    let mut item_task = Context::from_waker(&item_waker);
-
-    if sweep.remaining == 0 {
-        sweep.remaining = items.len();
-        sweep.generation = wake.generation();
-    } else {
-        sweep.remaining = sweep.remaining.min(items.len());
-    }
-    let poll_count = sweep.remaining.min(ACTIVE_POLL_BUDGET);
-    let mut polled = 0;
-    let mut completed = false;
-
-    for _ in 0..poll_count {
-        if control.mode() != expected_mode {
-            break;
-        }
-        // Poll before removal. Panic cleanup must retain scheduler ownership.
-        match poll(&mut items[0], &mut item_task) {
-            Poll::Ready(()) => {
-                let completed_item = items.pop_front().expect("the front item was just polled");
-                control.drop_user_value(completed_item);
-                completed = true;
-            }
-            Poll::Pending if is_leased(&items[0]) => {
-                sweep.restart();
-                return ReplyPoll::Leased;
-            }
-            Poll::Pending => items.rotate_left(1),
-        }
-        polled += 1;
-    }
-
-    sweep.remaining -= polled;
-    if items.is_empty() {
-        sweep.clear();
-    }
-    if control.mode() != expected_mode {
-        return ReplyPoll::Progress;
-    }
-    if sweep.remaining > 0 {
-        sweep
-            .wake
-            .as_ref()
-            .expect("an active sweep retains its waker")
-            .wake_task();
-        return ReplyPoll::BudgetExhausted;
-    } else if let Some(wake) = &sweep.wake
-        && wake.generation() != sweep.generation
-    {
-        wake.wake_task();
-    }
-
-    if completed {
-        ReplyPoll::Progress
-    } else {
-        ReplyPoll::Pending
-    }
-}
-
-#[derive(Default)]
-struct SweepState {
-    remaining: usize,
-    generation: usize,
-    wake: Option<Arc<SweepWaker>>,
-}
-
-impl SweepState {
-    fn restart(&mut self) {
-        self.remaining = 0;
-    }
-
-    fn clear(&mut self) {
-        if let Some(wake) = &self.wake {
-            wake.clear();
-        }
-        self.wake = None;
-        self.remaining = 0;
-        self.generation = 0;
-    }
-}
-
-#[derive(Default)]
-struct SweepWaker {
-    generation: AtomicUsize,
-    task: AtomicWaker,
-}
-
-impl SweepWaker {
-    fn register(&self, waker: &Waker) {
-        self.task.register(waker);
-    }
-
-    fn generation(&self) -> usize {
-        self.generation.load(Ordering::Acquire)
-    }
-
-    // A reactor may retain an item waker after its future is dropped.
-    // Detach the actor task before releasing the scheduler's strong edge.
-    fn clear(&self) {
-        if let Some(task) = self.task.take() {
-            drop_without_unwind(task);
-        }
-    }
-
-    fn notify(&self) {
-        self.generation.fetch_add(1, Ordering::Release);
-        self.wake_task();
-    }
-
-    // Continuation wakes must not create a future-notification generation.
-    fn wake_task(&self) {
-        if let Err(payload) = panic::catch_unwind(AssertUnwindSafe(|| self.task.wake())) {
-            Control::discard_panic(payload);
-        }
-    }
-}
-
-impl Wake for SweepWaker {
-    fn wake(self: Arc<Self>) {
-        self.notify();
-    }
-
-    fn wake_by_ref(self: &Arc<Self>) {
-        self.notify();
-    }
-}
-
-impl Drop for SweepWaker {
-    fn drop(&mut self) {
-        self.clear();
+        self.lease.force_release();
     }
 }
 

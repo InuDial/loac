@@ -11,7 +11,7 @@ use std::{
 use crate::{
     Actor, ActorConfig, ActorScope, ChildExit, ChildId, Cx, ExitReason, ExitStatus, HasMailbox,
     Shutdown, SubtreeStatus,
-    access::ScopedLease,
+    access::ScopedWake,
     mailbox::{ActorInbox, ActorInner, Control, Envelope, Mode},
     scheduling::{
         ActorScheduler, ReplyLane, ReplyProfile, RuntimeScheduler, ScheduledFuture, SchedulerTurn,
@@ -133,7 +133,7 @@ impl<A: Actor> Envelope<A> for ShutdownEnvelope {
     fn dispatch(
         self: Box<Self>,
         _cx: Cx<'_, A>,
-        _lease: ScopedLease<'_, A>,
+        _wake: ScopedWake<'_, A>,
         _scheduler: &mut ActorScheduler<A>,
         inner: &Arc<ActorInner<A>>,
     ) {
@@ -172,16 +172,16 @@ impl Envelope<TestActor> for BatchBoundaryEnvelope {
     fn dispatch(
         self: Box<Self>,
         _cx: Cx<'_, TestActor>,
-        _lease: ScopedLease<'_, TestActor>,
+        _wake: ScopedWake<'_, TestActor>,
         scheduler: &mut ActorScheduler<TestActor>,
         _inner: &Arc<ActorInner<TestActor>>,
     ) {
         self.dispatched.fetch_add(1, Ordering::SeqCst);
         match self.boundary {
             BatchBoundary::Exclusive => {
-                let (future, lease) = ScheduledFuture::test_scoped(std::future::pending::<()>());
-                scheduler.state().push(future);
-                lease.acquire_for_test();
+                scheduler
+                    .state()
+                    .push_leased(ScheduledFuture::test(std::future::pending::<()>()));
             }
             BatchBoundary::Reply => {
                 scheduler.state().push(ScheduledFuture::test(async {}));
@@ -271,12 +271,13 @@ async fn completed_leased_drop_panic_is_contained_after_removal() {
     let mut fixture = ActorTurnFixture::new(1, NonZeroUsize::MIN);
     let drops = Arc::new(AtomicUsize::new(0));
     let dropped_while_unwinding = Arc::new(AtomicBool::new(false));
-    let (future, lease) = ScheduledFuture::test_scoped(ReadyExclusiveDrop {
-        drops: Arc::clone(&drops),
-        dropped_while_unwinding: Arc::clone(&dropped_while_unwinding),
-    });
-    fixture.scheduler.state().push(future);
-    lease.acquire_for_test();
+    fixture
+        .scheduler
+        .state()
+        .push_leased(ScheduledFuture::test(ReadyExclusiveDrop {
+            drops: Arc::clone(&drops),
+            dropped_while_unwinding: Arc::clone(&dropped_while_unwinding),
+        }));
 
     assert!(matches!(
         fixture.next(Mode::Running).await,

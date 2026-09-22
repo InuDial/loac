@@ -15,7 +15,7 @@ use tokio::sync::{mpsc, oneshot};
 
 use crate::{
     Actor, CallError, Handler, Message, StreamHandler, StreamOut,
-    access::{Cx, ScopedLease},
+    access::{Cx, ScopedWake},
     mailbox::DispatchReply,
     scheduling::{ActorScheduler, RuntimeScheduler, ScheduledFuture},
 };
@@ -48,7 +48,7 @@ pub(crate) trait DispatchMessage<A: Actor, M: Message>: ReplyKind {
     fn dispatch(
         message: M,
         cx: Cx<'_, A>,
-        lease: ScopedLease<'_, A>,
+        wake: ScopedWake<'_, A>,
         scheduler: &mut ActorScheduler<A>,
         reply: DispatchReply<'_, A, M::Reply>,
     );
@@ -62,14 +62,14 @@ where
     fn dispatch(
         message: M,
         cx: Cx<'_, A>,
-        lease: ScopedLease<'_, A>,
+        wake: ScopedWake<'_, A>,
         scheduler: &mut ActorScheduler<A>,
         reply: DispatchReply<'_, A, M::Reply>,
     ) {
         let future = A::handle(message, cx);
         RuntimeScheduler::push(
             scheduler,
-            ScheduledFuture::scoped(CompleteReply::new(future, reply.into_scheduled()), lease),
+            ScheduledFuture::scoped(CompleteReply::new(future, reply.into_scheduled()), wake),
         );
     }
 }
@@ -82,7 +82,7 @@ where
     fn dispatch(
         message: M,
         cx: Cx<'_, A>,
-        lease: ScopedLease<'_, A>,
+        wake: ScopedWake<'_, A>,
         scheduler: &mut ActorScheduler<A>,
         reply: DispatchReply<'_, A, M::Reply>,
     ) {
@@ -94,7 +94,7 @@ where
         reply.complete(StreamReply { item_rx, final_rx });
         RuntimeScheduler::push(
             scheduler,
-            ScheduledFuture::scoped(FinishStream::new(future, final_tx), lease),
+            ScheduledFuture::scoped(FinishStream::new(future, final_tx), wake),
         );
     }
 }
