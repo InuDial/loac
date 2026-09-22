@@ -71,9 +71,9 @@ fn truncated_reply_sweep_yields_before_ready_mailbox() {
     let (_, _, mut scheduler) = TestActor::open(&options);
     for _ in 0..REPLIES {
         let replies_polled = Arc::clone(&replies_polled);
-        scheduler.state().push(ScheduledFuture::test(async move {
+        scheduler.state().push_test(async move {
             replies_polled.fetch_add(1, Ordering::SeqCst);
-        }));
+        });
     }
     let actor_ref = actor_ref(&inner);
     let mut access = ActorAccess::new(actor_ref, TestActor, scope);
@@ -131,12 +131,10 @@ async fn child_kill_commits_before_actor_work_is_dropped() {
     let (_, _, mut scheduler) = TestActor::open(&options);
     let actor_ref = actor_ref(&inner);
     let mut access = ActorAccess::new(actor_ref, TestActor, scope);
-    scheduler
-        .state()
-        .push(ScheduledFuture::test(ChildKillDropProbe {
-            child: child_inner,
-            observed_kill: Arc::clone(&active_observed_kill),
-        }));
+    scheduler.state().push_test(ChildKillDropProbe {
+        child: child_inner,
+        observed_kill: Arc::clone(&active_observed_kill),
+    });
 
     assert_eq!(
         kill_actor(&mut access, &mut inbox, &inner.control, &mut scheduler,).await,

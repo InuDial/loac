@@ -1,6 +1,6 @@
 use std::{marker::PhantomData, num::NonZeroUsize};
 
-use crate::Actor;
+use crate::{Actor, access::ReplySlot};
 
 use super::{Dynamic, Fixed, ScheduledFuture, Unbounded, queue::Queue};
 
@@ -87,14 +87,30 @@ impl<A: Actor, L: LimitPolicy> ReplyState<A, L> {
         !self.queue.is_empty()
     }
 
-    pub(crate) fn push(&mut self, future: ScheduledFuture) {
+    pub(crate) fn schedule<F>(&mut self, build: F)
+    where
+        F: FnOnce(ReplySlot) -> ScheduledFuture,
+    {
         debug_assert!(self.has_dispatch_capacity());
-        let _ = self.queue.push(future);
+        self.queue.schedule(build);
     }
 
     #[cfg(test)]
-    pub(crate) fn push_leased(&mut self, future: ScheduledFuture) {
-        self.queue.push_leased(future);
+    pub(crate) fn push_test<F>(&mut self, future: F)
+    where
+        F: std::future::Future<Output = ()> + Send + 'static,
+    {
+        debug_assert!(self.has_dispatch_capacity());
+        self.queue.schedule_test(future);
+    }
+
+    #[cfg(test)]
+    pub(crate) fn push_leased<F>(&mut self, future: F)
+    where
+        F: std::future::Future<Output = ()> + Send + 'static,
+    {
+        debug_assert!(self.has_dispatch_capacity());
+        self.queue.schedule_leased(future);
     }
 }
 

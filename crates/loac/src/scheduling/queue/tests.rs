@@ -160,10 +160,10 @@ fn push_marks_only_the_first_poll_ready() {
     let actor = test_actor_inner();
     let mut queue = Queue::new();
     let polls = Arc::new(AtomicUsize::new(0));
-    queue.push(ScheduledFuture::test(PollCounter {
+    queue.schedule_test(PollCounter {
         polls: Arc::clone(&polls),
         completes: false,
-    }));
+    });
 
     assert_eq!(
         poll_queue(&mut queue, &actor.control, Waker::noop()),
@@ -183,9 +183,9 @@ fn wake_pushes_one_key_per_ready_episode() {
     let actor = test_actor_inner();
     let mut queue = Queue::new();
     let retained = Arc::new(Mutex::new(None));
-    queue.push(ScheduledFuture::test(CaptureWaker {
+    queue.schedule_test(CaptureWaker {
         waker: Arc::clone(&retained),
-    }));
+    });
     let wakes = Arc::new(WakeCounter(AtomicUsize::new(0)));
     let waker = Waker::from(Arc::clone(&wakes));
 
@@ -220,10 +220,10 @@ fn budget_truncates_then_self_wakes() {
     let mut queue = Queue::new();
     let polls = Arc::new(AtomicUsize::new(0));
     for _ in 0..(ACTIVE_POLL_BUDGET + 4) {
-        queue.push(ScheduledFuture::test(PollCounter {
+        queue.schedule_test(PollCounter {
             polls: Arc::clone(&polls),
             completes: false,
-        }));
+        });
     }
     let wakes = Arc::new(WakeCounter(AtomicUsize::new(0)));
     let waker = Waker::from(Arc::clone(&wakes));
@@ -248,10 +248,10 @@ fn wake_during_poll_is_drained_in_the_same_turn() {
     let actor = test_actor_inner();
     let mut queue = Queue::new();
     let polls = Arc::new(AtomicUsize::new(0));
-    queue.push(ScheduledFuture::test(SelfWakeOnce {
+    queue.schedule_test(SelfWakeOnce {
         polls: Arc::clone(&polls),
         woken: false,
-    }));
+    });
 
     // The self-wake pushes a fresh key that the same drain consumes.
     assert_eq!(
@@ -266,7 +266,7 @@ fn wake_during_poll_is_drained_in_the_same_turn() {
 fn stale_keys_are_skipped() {
     let actor = test_actor_inner();
     let mut queue = Queue::new();
-    let key = queue.push(ScheduledFuture::test(async {}));
+    let key = queue.schedule_test(async {});
 
     assert_eq!(
         poll_queue(&mut queue, &actor.control, Waker::noop()),
@@ -285,15 +285,15 @@ fn a_lease_pauses_every_other_reply() {
     let actor = test_actor_inner();
     let mut queue = Queue::new();
     let leased_polls = Arc::new(AtomicUsize::new(0));
-    queue.push_leased(ScheduledFuture::test(PollCounter {
+    queue.schedule_leased(PollCounter {
         polls: Arc::clone(&leased_polls),
         completes: false,
-    }));
+    });
     let other_polls = Arc::new(AtomicUsize::new(0));
-    queue.push(ScheduledFuture::test(PollCounter {
+    queue.schedule_test(PollCounter {
         polls: Arc::clone(&other_polls),
         completes: true,
-    }));
+    });
     assert!(queue.is_leased());
 
     assert_eq!(
@@ -323,7 +323,7 @@ fn a_lease_pauses_every_other_reply() {
 fn completing_the_leased_reply_releases_the_slot() {
     let actor = test_actor_inner();
     let mut queue = Queue::new();
-    queue.push_leased(ScheduledFuture::test(async {}));
+    queue.schedule_leased(async {});
 
     assert_eq!(
         poll_queue(&mut queue, &actor.control, Waker::noop()),
@@ -339,14 +339,14 @@ fn kill_committed_by_one_reply_stops_the_drain() {
     let mut queue = Queue::new();
     let first_polls = Arc::new(AtomicUsize::new(0));
     let second_polls = Arc::new(AtomicUsize::new(0));
-    queue.push(ScheduledFuture::test(KillOnPoll {
+    queue.schedule_test(KillOnPoll {
         actor: Arc::clone(&actor),
         polls: Arc::clone(&first_polls),
-    }));
-    queue.push(ScheduledFuture::test(PollCounter {
+    });
+    queue.schedule_test(PollCounter {
         polls: Arc::clone(&second_polls),
         completes: true,
-    }));
+    });
 
     assert_eq!(
         poll_queue(&mut queue, &actor.control, Waker::noop()),
@@ -362,9 +362,9 @@ fn wake_contains_actor_task_waker_panic() {
     let actor = test_actor_inner();
     let mut queue = Queue::new();
     let retained = Arc::new(Mutex::new(None));
-    queue.push(ScheduledFuture::test(CaptureWaker {
+    queue.schedule_test(CaptureWaker {
         waker: Arc::clone(&retained),
-    }));
+    });
     let waker = Waker::from(Arc::new(PanicWake));
 
     assert_eq!(
@@ -384,7 +384,7 @@ fn budget_continuation_contains_actor_task_waker_panic() {
     let actor = test_actor_inner();
     let mut queue = Queue::new();
     for _ in 0..=ACTIVE_POLL_BUDGET {
-        queue.push(ScheduledFuture::test(std::future::pending::<()>()));
+        queue.schedule_test(std::future::pending::<()>());
     }
     let waker = Waker::from(Arc::new(PanicWake));
 
@@ -399,9 +399,9 @@ fn late_wake_after_clear_is_a_no_op() {
     let actor = test_actor_inner();
     let mut queue = Queue::new();
     let retained = Arc::new(Mutex::new(None));
-    queue.push(ScheduledFuture::test(CaptureWaker {
+    queue.schedule_test(CaptureWaker {
         waker: Arc::clone(&retained),
-    }));
+    });
 
     assert_eq!(
         poll_queue(&mut queue, &actor.control, Waker::noop()),
@@ -430,14 +430,14 @@ fn clear_releases_the_lease_and_contains_drops() {
     let dropped_while_unwinding = Arc::new(AtomicBool::new(false));
     let mut queue = Queue::new();
 
-    queue.push_leased(ScheduledFuture::test(ReadyWithPanickingDrop {
+    queue.schedule_leased(ReadyWithPanickingDrop {
         drops: Arc::clone(&leased_drops),
         dropped_while_unwinding: Arc::clone(&dropped_while_unwinding),
-    }));
-    queue.push(ScheduledFuture::test(ReadyWithPanickingDrop {
+    });
+    queue.schedule_test(ReadyWithPanickingDrop {
         drops: Arc::clone(&reply_drops),
         dropped_while_unwinding: Arc::clone(&dropped_while_unwinding),
-    }));
+    });
 
     queue.clear(&actor.control);
 
@@ -456,10 +456,10 @@ fn queue_drop_contains_each_future_panic() {
     let dropped_while_unwinding = Arc::new(AtomicBool::new(false));
     let mut queue = Queue::new();
     for _ in 0..2 {
-        queue.push(ScheduledFuture::test(ReadyWithPanickingDrop {
+        queue.schedule_test(ReadyWithPanickingDrop {
             drops: Arc::clone(&drops),
             dropped_while_unwinding: Arc::clone(&dropped_while_unwinding),
-        }));
+        });
     }
 
     drop(queue);

@@ -15,8 +15,9 @@ use tokio::sync::{mpsc, oneshot};
 
 use crate::{
     Actor, CallError, Handler, Message, StreamHandler, StreamOut,
-    access::{Cx, ScopedWake},
+    access::Cx,
     mailbox::DispatchReply,
+    runtime::ActorAccess,
     scheduling::{ActorScheduler, RuntimeScheduler, ScheduledFuture},
 };
 
@@ -47,8 +48,7 @@ impl ReplyKind for StreamKind {}
 pub(crate) trait DispatchMessage<A: Actor, M: Message>: ReplyKind {
     fn dispatch(
         message: M,
-        cx: Cx<'_, A>,
-        wake: ScopedWake<'_, A>,
+        access: &mut ActorAccess<A>,
         scheduler: &mut ActorScheduler<A>,
         reply: DispatchReply<'_, A, M::Reply>,
     );
@@ -61,16 +61,15 @@ where
 {
     fn dispatch(
         message: M,
-        cx: Cx<'_, A>,
-        wake: ScopedWake<'_, A>,
+        access: &mut ActorAccess<A>,
         scheduler: &mut ActorScheduler<A>,
         reply: DispatchReply<'_, A, M::Reply>,
     ) {
-        let future = A::handle(message, cx);
-        RuntimeScheduler::push(
-            scheduler,
-            ScheduledFuture::scoped(CompleteReply::new(future, reply.into_scheduled()), wake),
-        );
+        scheduler.schedule(move |slot| {
+            let (cx, wake) = Cx::new(access, slot);
+            let future = A::handle(message, cx);
+            ScheduledFuture::scoped(CompleteReply::new(future, reply.into_scheduled()), wake)
+        });
     }
 }
 
@@ -81,21 +80,20 @@ where
 {
     fn dispatch(
         message: M,
-        cx: Cx<'_, A>,
-        wake: ScopedWake<'_, A>,
+        access: &mut ActorAccess<A>,
         scheduler: &mut ActorScheduler<A>,
         reply: DispatchReply<'_, A, M::Reply>,
     ) {
         let (item_tx, item_rx) = mpsc::channel::<M::Item>(8);
         let (final_tx, final_rx) = oneshot::channel::<M::Final>();
-        let out = StreamOut::new(item_tx);
-        let future = A::handle(message, out, cx);
-
         reply.complete(StreamReply { item_rx, final_rx });
-        RuntimeScheduler::push(
-            scheduler,
-            ScheduledFuture::scoped(FinishStream::new(future, final_tx), wake),
-        );
+
+        scheduler.schedule(move |slot| {
+            let (cx, wake) = Cx::new(access, slot);
+            let out = StreamOut::new(item_tx);
+            let future = A::handle(message, out, cx);
+            ScheduledFuture::scoped(FinishStream::new(future, final_tx), wake)
+        });
     }
 }
 

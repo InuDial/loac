@@ -42,9 +42,7 @@ struct PanicSafeWake(Waker);
 
 impl PanicSafeWake {
     fn forward(&self) {
-        if let Err(payload) = panic::catch_unwind(AssertUnwindSafe(|| self.0.wake_by_ref())) {
-            Control::discard_panic(payload);
-        }
+        Control::contain_unwind(|| self.0.wake_by_ref());
     }
 }
 
@@ -61,9 +59,7 @@ impl Wake for PanicSafeWake {
 impl Drop for PanicSafeWake {
     fn drop(&mut self) {
         let waker = std::mem::replace(&mut self.0, Waker::noop().clone());
-        if let Err(payload) = panic::catch_unwind(AssertUnwindSafe(|| drop(waker))) {
-            Control::discard_panic(payload);
-        }
+        Control::contain_unwind(|| drop(waker));
     }
 }
 
@@ -280,6 +276,15 @@ impl Control {
     pub(crate) fn drop_user_value<T>(&self, value: T) {
         if let Err(payload) = panic::catch_unwind(AssertUnwindSafe(|| drop(value))) {
             self.contain_panic(payload);
+        }
+    }
+
+    /// Runs one panic-contained callback without unwinding into its caller.
+    ///
+    /// Cleanup paths that own no lifecycle state use this boundary.
+    pub(crate) fn contain_unwind(contained: impl FnOnce()) {
+        if let Err(payload) = panic::catch_unwind(AssertUnwindSafe(contained)) {
+            Self::discard_panic(payload);
         }
     }
 

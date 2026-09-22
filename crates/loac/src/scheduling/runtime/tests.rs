@@ -11,7 +11,7 @@ use std::{
 use crate::{
     Actor, ActorConfig, ActorScope, MessageConfig,
     mailbox::{ActorInner, Mode},
-    scheduling::{Fixed, ReplyProfile, ScheduledFuture},
+    scheduling::{Fixed, ReplyProfile},
 };
 
 use super::RuntimeScheduler;
@@ -86,13 +86,9 @@ fn fixed_limit_stops_dispatch_at_capacity() {
     let (_, _, mut scheduler) = FixedActor::open(&options);
 
     assert!(scheduler.state().has_dispatch_capacity());
-    scheduler
-        .state()
-        .push(ScheduledFuture::test(std::future::pending::<()>()));
+    scheduler.state().push_test(std::future::pending::<()>());
     assert!(scheduler.state().has_dispatch_capacity());
-    scheduler
-        .state()
-        .push(ScheduledFuture::test(std::future::pending::<()>()));
+    scheduler.state().push_test(std::future::pending::<()>());
     assert!(!scheduler.state().has_dispatch_capacity());
 }
 
@@ -101,18 +97,14 @@ fn dynamic_limit_uses_each_spawn_option() {
     let options = <DynamicActor as ActorConfig>::Options::default();
     let (_, _, mut scheduler) = DynamicActor::open(&options);
     for _ in 0..2 {
-        scheduler
-            .state()
-            .push(ScheduledFuture::test(std::future::pending::<()>()));
+        scheduler.state().push_test(std::future::pending::<()>());
     }
     assert!(!scheduler.state().has_dispatch_capacity());
 
     let options = options.with_max_in_flight(std::num::NonZeroUsize::new(3).unwrap());
     let (_, _, mut scheduler) = DynamicActor::open(&options);
     for _ in 0..2 {
-        scheduler
-            .state()
-            .push(ScheduledFuture::test(std::future::pending::<()>()));
+        scheduler.state().push_test(std::future::pending::<()>());
     }
     assert!(scheduler.state().has_dispatch_capacity());
 }
@@ -124,9 +116,7 @@ fn unbounded_profile_never_closes_capacity() {
 
     for _ in 0..128 {
         assert!(scheduler.state().has_dispatch_capacity());
-        scheduler
-            .state()
-            .push(ScheduledFuture::test(std::future::pending::<()>()));
+        scheduler.state().push_test(std::future::pending::<()>());
     }
     assert!(scheduler.state().has_dispatch_capacity());
 }
@@ -171,16 +161,16 @@ fn clear_contains_each_reply_drop() {
     let dropped_while_unwinding = Arc::new(AtomicBool::new(false));
     let mut scheduler = dynamic_scheduler();
 
-    scheduler.push(ScheduledFuture::test(DropProbe {
+    scheduler.state().push_test(DropProbe {
         dropped: Arc::clone(&reply_dropped),
         dropped_while_unwinding: Arc::clone(&dropped_while_unwinding),
         panic: false,
-    }));
-    scheduler.push(ScheduledFuture::test(DropProbe {
+    });
+    scheduler.state().push_test(DropProbe {
         dropped: Arc::clone(&exclusive_dropped),
         dropped_while_unwinding: Arc::clone(&dropped_while_unwinding),
         panic: true,
-    }));
+    });
     RuntimeScheduler::clear(&mut scheduler, &actor.control);
 
     assert!(exclusive_dropped.load(Ordering::SeqCst));
@@ -202,11 +192,11 @@ fn queue_clear_continues_after_one_drop_panics() {
         (Arc::clone(&first_dropped), true),
         (Arc::clone(&second_dropped), false),
     ] {
-        scheduler.push(ScheduledFuture::test(DropProbe {
+        scheduler.state().push_test(DropProbe {
             dropped,
             dropped_while_unwinding: Arc::clone(&dropped_while_unwinding),
             panic,
-        }));
+        });
     }
     RuntimeScheduler::clear(&mut scheduler, &actor.control);
 

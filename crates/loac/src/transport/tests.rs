@@ -5,9 +5,9 @@ use std::{
 };
 
 use crate::{
-    Actor, ActorScope, Cx,
-    access::ScopedWake,
+    Actor, ActorScope,
     mailbox::{ActorInner, Control, Envelope},
+    runtime::ActorAccess,
     scheduling::ActorScheduler,
 };
 
@@ -35,8 +35,7 @@ struct ProbeEnvelope {
 impl Envelope<TestActor> for ProbeEnvelope {
     fn dispatch(
         self: Box<Self>,
-        _cx: Cx<'_, TestActor>,
-        _wake: ScopedWake<'_, TestActor>,
+        _access: &mut ActorAccess<TestActor>,
         _scheduler: &mut ActorScheduler<TestActor>,
         _inner: &Arc<ActorInner<TestActor>>,
     ) {

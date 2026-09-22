@@ -8,8 +8,9 @@ use tokio::sync::oneshot;
 
 use crate::{
     Actor, CallError, HasMailbox, Message, StreamHandler, StreamMessage, StreamOut, Writer,
-    access::{Cx, ScopedWake},
+    access::Cx,
     reply::{CompleteReply, DispatchMessage},
+    runtime::ActorAccess,
     scheduling::{ActorScheduler, RuntimeScheduler, ScheduledFuture},
     transport::{ErasedEnvelope, RuntimeInbox},
 };
@@ -119,8 +120,7 @@ pub(crate) trait Envelope<A: Actor>: Send {
     /// rejection without invoking user handler code.
     fn dispatch(
         self: Box<Self>,
-        cx: Cx<'_, A>,
-        wake: ScopedWake<'_, A>,
+        access: &mut ActorAccess<A>,
         scheduler: &mut ActorScheduler<A>,
         inner: &Arc<ActorInner<A>>,
     );
@@ -132,12 +132,11 @@ pub(crate) trait Envelope<A: Actor>: Send {
 impl<A: Actor> ErasedEnvelope<A> {
     pub(crate) fn dispatch(
         self,
-        cx: Cx<'_, A>,
-        wake: ScopedWake<'_, A>,
+        access: &mut ActorAccess<A>,
         scheduler: &mut ActorScheduler<A>,
         inner: &Arc<ActorInner<A>>,
     ) {
-        self.into_envelope().dispatch(cx, wake, scheduler, inner);
+        self.into_envelope().dispatch(access, scheduler, inner);
     }
 
     pub(crate) fn discard(self, control: &Control) {
@@ -185,8 +184,7 @@ where
 {
     fn dispatch(
         self: Box<Self>,
-        cx: Cx<'_, A>,
-        wake: ScopedWake<'_, A>,
+        access: &mut ActorAccess<A>,
         scheduler: &mut ActorScheduler<A>,
         inner: &Arc<ActorInner<A>>,
     ) {
@@ -209,7 +207,7 @@ where
 
         // The permit commits DuringDispatch before handler construction.
         let reply = DispatchReply::new(reply, permit);
-        M::Kind::dispatch(message, cx, wake, scheduler, reply);
+        M::Kind::dispatch(message, access, scheduler, reply);
     }
 
     fn discard(self: Box<Self>, control: &Control) {
@@ -245,8 +243,7 @@ where
 {
     fn dispatch(
         self: Box<Self>,
-        cx: Cx<'_, A>,
-        wake: ScopedWake<'_, A>,
+        access: &mut ActorAccess<A>,
         scheduler: &mut ActorScheduler<A>,
         inner: &Arc<ActorInner<A>>,
     ) {
@@ -259,7 +256,7 @@ where
         // One-way completion still owns a dispatch permit, so panic and Kill
         // use the same state transition as a call even though no result is sent.
         let reply = DispatchReply::one_way(permit);
-        M::Kind::dispatch(message, cx, wake, scheduler, reply);
+        M::Kind::dispatch(message, access, scheduler, reply);
     }
 
     fn discard(self: Box<Self>, control: &Control) {
@@ -338,8 +335,7 @@ where
 {
     fn dispatch(
         self: Box<Self>,
-        cx: Cx<'_, A>,
-        wake: ScopedWake<'_, A>,
+        access: &mut ActorAccess<A>,
         scheduler: &mut ActorScheduler<A>,
         inner: &Arc<ActorInner<A>>,
     ) {
@@ -371,12 +367,12 @@ where
             None => DispatchReply::one_way(permit),
         };
 
-        let out = StreamOut::new(out);
-        let future = <A as StreamHandler<M>>::handle(message, out, cx);
-        RuntimeScheduler::push(
-            scheduler,
-            ScheduledFuture::scoped(CompleteReply::new(future, reply.into_scheduled()), wake),
-        );
+        scheduler.schedule(move |slot| {
+            let (cx, wake) = Cx::new(access, slot);
+            let out = StreamOut::new(out);
+            let future = <A as StreamHandler<M>>::handle(message, out, cx);
+            ScheduledFuture::scoped(CompleteReply::new(future, reply.into_scheduled()), wake)
+        });
     }
 
     fn discard(self: Box<Self>, control: &Control) {

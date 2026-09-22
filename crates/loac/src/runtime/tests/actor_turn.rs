@@ -9,13 +9,10 @@ use std::{
 };
 
 use crate::{
-    Actor, ActorConfig, ActorScope, ChildExit, ChildId, Cx, ExitReason, ExitStatus, HasMailbox,
+    Actor, ActorConfig, ActorScope, ChildExit, ChildId, ExitReason, ExitStatus, HasMailbox,
     Shutdown, SubtreeStatus,
-    access::ScopedWake,
     mailbox::{ActorInbox, ActorInner, Control, Envelope, Mode},
-    scheduling::{
-        ActorScheduler, ReplyLane, ReplyProfile, RuntimeScheduler, ScheduledFuture, SchedulerTurn,
-    },
+    scheduling::{ActorScheduler, ReplyLane, ReplyProfile, RuntimeScheduler, SchedulerTurn},
     supervision::runtime::tests::ChildrenFixture,
     transport::MessageConfig,
 };
@@ -132,8 +129,7 @@ struct ShutdownEnvelope {
 impl<A: Actor> Envelope<A> for ShutdownEnvelope {
     fn dispatch(
         self: Box<Self>,
-        _cx: Cx<'_, A>,
-        _wake: ScopedWake<'_, A>,
+        _access: &mut ActorAccess<A>,
         _scheduler: &mut ActorScheduler<A>,
         inner: &Arc<ActorInner<A>>,
     ) {
@@ -171,20 +167,17 @@ impl Drop for ReadyExclusiveDrop {
 impl Envelope<TestActor> for BatchBoundaryEnvelope {
     fn dispatch(
         self: Box<Self>,
-        _cx: Cx<'_, TestActor>,
-        _wake: ScopedWake<'_, TestActor>,
+        _access: &mut ActorAccess<TestActor>,
         scheduler: &mut ActorScheduler<TestActor>,
         _inner: &Arc<ActorInner<TestActor>>,
     ) {
         self.dispatched.fetch_add(1, Ordering::SeqCst);
         match self.boundary {
             BatchBoundary::Exclusive => {
-                scheduler
-                    .state()
-                    .push_leased(ScheduledFuture::test(std::future::pending::<()>()));
+                scheduler.state().push_leased(std::future::pending::<()>());
             }
             BatchBoundary::Reply => {
-                scheduler.state().push(ScheduledFuture::test(async {}));
+                scheduler.state().push_test(async {});
             }
         }
     }
@@ -211,12 +204,12 @@ async fn ordinary_cursor_visits_each_actor_source_between_mailbox_batches() {
     ));
 
     let reply_completed = Arc::new(AtomicBool::new(false));
-    fixture.scheduler.push(ScheduledFuture::test({
+    fixture.scheduler.state().push_test({
         let completed = Arc::clone(&reply_completed);
         async move {
             completed.store(true, Ordering::SeqCst);
         }
-    }));
+    });
     assert!(matches!(
         fixture.next(Mode::Running).await,
         SchedulerTurn::Progress
@@ -271,13 +264,10 @@ async fn completed_leased_drop_panic_is_contained_after_removal() {
     let mut fixture = ActorTurnFixture::new(1, NonZeroUsize::MIN);
     let drops = Arc::new(AtomicUsize::new(0));
     let dropped_while_unwinding = Arc::new(AtomicBool::new(false));
-    fixture
-        .scheduler
-        .state()
-        .push_leased(ScheduledFuture::test(ReadyExclusiveDrop {
-            drops: Arc::clone(&drops),
-            dropped_while_unwinding: Arc::clone(&dropped_while_unwinding),
-        }));
+    fixture.scheduler.state().push_leased(ReadyExclusiveDrop {
+        drops: Arc::clone(&drops),
+        dropped_while_unwinding: Arc::clone(&dropped_while_unwinding),
+    });
 
     assert!(matches!(
         fixture.next(Mode::Running).await,
@@ -297,10 +287,7 @@ async fn drain_rotates_then_uses_the_configured_mailbox_dispatch_budget() {
     let dispatched = Arc::new(AtomicUsize::new(0));
     let mut fixture =
         ActorTurnFixture::new(mailbox_dispatch_budget + 2, NonZeroUsize::new(2).unwrap());
-    fixture
-        .scheduler
-        .state()
-        .push(ScheduledFuture::test(async {}));
+    fixture.scheduler.state().push_test(async {});
     fixture.access.state().children.publish(ChildExit::new(
         ChildId::invalid_for_test(),
         ExitStatus::new(ExitReason::Stopped, SubtreeStatus::Terminated),

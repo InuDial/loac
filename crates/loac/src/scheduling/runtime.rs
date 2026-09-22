@@ -1,4 +1,5 @@
 #![allow(
+    private_bounds,
     private_interfaces,
     reason = "public profile proofs remain hidden by the private runtime module"
 )]
@@ -10,7 +11,7 @@ use std::{
 
 use crate::{
     Actor, ChildExit,
-    access::Cx,
+    access::ReplySlot,
     mailbox::{ActorInbox, ActorInner, Control, Mode},
     runtime::ActorAccess,
     transport::{MessageConfig, MessageInbox, MessageSender, NoInbox, NoSender},
@@ -44,7 +45,9 @@ pub(crate) struct TurnContext<'a, A: Actor> {
 }
 
 pub(crate) trait RuntimeScheduler<A: Actor>: Send + 'static {
-    fn push(&mut self, future: ScheduledFuture);
+    fn schedule<F>(&mut self, build: F)
+    where
+        F: FnOnce(ReplySlot) -> ScheduledFuture;
 
     fn is_idle(&mut self) -> bool;
 
@@ -65,7 +68,9 @@ pub(crate) trait RuntimeScheduler<A: Actor>: Send + 'static {
 }
 
 pub trait ProfileRuntime<A: Actor, P: Send + 'static>: Send + 'static {
-    fn push(scheduler: &mut P, future: ScheduledFuture);
+    fn schedule<F>(scheduler: &mut P, build: F)
+    where
+        F: FnOnce(ReplySlot) -> ScheduledFuture;
 
     fn is_idle(scheduler: &mut P) -> bool;
 
@@ -94,8 +99,11 @@ where
     A: Actor + MessageConfig<Scheduler = P>,
     P: SchedulerProfile<A>,
 {
-    fn push(&mut self, future: ScheduledFuture) {
-        P::Runtime::push(self, future);
+    fn schedule<F>(&mut self, build: F)
+    where
+        F: FnOnce(ReplySlot) -> ScheduledFuture,
+    {
+        P::Runtime::schedule(self, build);
     }
 
     fn is_idle(&mut self) -> bool {
@@ -130,7 +138,10 @@ impl<A> ProfileRuntime<A, Disabled> for DisabledRuntime
 where
     A: Actor + MessageConfig<Sender = NoSender, Inbox = NoInbox, Scheduler = Disabled>,
 {
-    fn push(_scheduler: &mut Disabled, _future: ScheduledFuture) {
+    fn schedule<F>(_scheduler: &mut Disabled, _build: F)
+    where
+        F: FnOnce(ReplySlot) -> ScheduledFuture,
+    {
         unreachable!("an actor without a mailbox cannot schedule replies")
     }
 
@@ -172,8 +183,11 @@ where
     A::Inbox: MessageInbox<A>,
     P: ReplyProfile<A>,
 {
-    fn push(scheduler: &mut P, future: ScheduledFuture) {
-        scheduler.state().push(future);
+    fn schedule<F>(scheduler: &mut P, build: F)
+    where
+        F: FnOnce(ReplySlot) -> ScheduledFuture,
+    {
+        scheduler.state().schedule(build);
     }
 
     fn is_idle(scheduler: &mut P) -> bool {
@@ -228,8 +242,7 @@ where
                     loop {
                         match turn.inbox.poll_recv(task) {
                             Poll::Ready(Some(envelope)) => {
-                                let (cx, wake) = Cx::new(turn.access);
-                                envelope.dispatch(cx, wake, scheduler, turn.inner);
+                                envelope.dispatch(turn.access, scheduler, turn.inner);
                                 dispatched += 1;
                             }
                             Poll::Ready(None) => break Some(SchedulerTurn::InboxClosed),

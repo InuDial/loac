@@ -23,7 +23,6 @@ mod state;
 
 use std::{
     future::Future,
-    panic::{self, AssertUnwindSafe},
     pin::Pin,
     sync::Arc,
     task::{Context, Poll, Waker},
@@ -32,8 +31,10 @@ use std::{
 use crate::{
     Actor,
     access::{ReplyWake, ScopedWake},
-    mailbox::Control,
 };
+
+#[cfg(test)]
+use crate::access::ReplySlot;
 
 pub use profile::{Disabled, Dynamic, Fixed, SchedulerProfile, Unbounded};
 pub(crate) use runtime::{ActorScheduler, RuntimeScheduler, SchedulerTurn, TurnContext};
@@ -90,23 +91,15 @@ impl ScheduledFuture {
         self.wake.waker()
     }
 
-    /// Wraps ordinary test work with an unattached wake state.
+    /// Wraps ordinary test work with queue-attached wake state.
     #[cfg(test)]
-    pub(crate) fn test<F>(future: F) -> Self
+    pub(crate) fn test_with<F>(slot: ReplySlot, future: F) -> Self
     where
         F: Future<Output = ()> + Send + 'static,
     {
         Self {
             future: Box::pin(future),
-            wake: ReplyWake::new(),
+            wake: ReplyWake::new(slot),
         }
-    }
-}
-
-// Automatic frame destruction cannot borrow the actor's lifecycle control.
-// Isolate each value so one Drop panic cannot skip sibling cleanup.
-fn drop_without_unwind<T>(value: T) {
-    if let Err(payload) = panic::catch_unwind(AssertUnwindSafe(|| drop(value))) {
-        Control::discard_panic(payload);
     }
 }

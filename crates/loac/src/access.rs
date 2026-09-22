@@ -20,9 +20,8 @@ use std::{
     cell::Cell,
     marker::PhantomData,
     ops::Deref,
-    panic::{self, AssertUnwindSafe},
     sync::{
-        Arc, OnceLock,
+        Arc,
         atomic::{AtomicBool, AtomicU64, Ordering},
     },
     task::{Wake, Waker},
@@ -76,14 +75,20 @@ pub struct ExclusiveGuard<'cx, 'actor, A: Actor> {
 /// The waker pushes the reply key once per ready episode.
 /// The scheduler clears the flag before polling the reply.
 /// Duplicate and stale keys are rejected during the drain.
+/// Queue coordinates arrive before the wake exists.
 pub(crate) struct ReplyWake {
+    key: DefaultKey,
     ready: AtomicBool,
-    entry: OnceLock<QueueEntry>,
+    queue: Arc<SegQueue<DefaultKey>>,
+    lease: Arc<Lease>,
     task: AtomicWaker,
 }
 
-/// Queue coordinates attached before the first poll.
-pub(crate) struct QueueEntry {
+/// Queue coordinates handed to one reply builder.
+///
+/// The slot map allocates the key before the value exists.
+/// A builder therefore never observes an unattached wake.
+pub(crate) struct ReplySlot {
     pub(crate) key: DefaultKey,
     pub(crate) ready: Arc<SegQueue<DefaultKey>>,
     pub(crate) lease: Arc<Lease>,
@@ -115,31 +120,22 @@ impl<A: Actor> ExclusiveGuard<'_, '_, A> {
 }
 
 impl ReplyWake {
-    pub(crate) fn new() -> Arc<Self> {
+    pub(crate) fn new(slot: ReplySlot) -> Arc<Self> {
         Arc::new(Self {
+            key: slot.key,
             ready: AtomicBool::new(false),
-            entry: OnceLock::new(),
+            queue: slot.ready,
+            lease: slot.lease,
             task: AtomicWaker::new(),
         })
-    }
-
-    pub(crate) fn attach(
-        &self,
-        key: DefaultKey,
-        ready: Arc<SegQueue<DefaultKey>>,
-        lease: Arc<Lease>,
-    ) {
-        let _ = self.entry.set(QueueEntry { key, ready, lease });
     }
 
     /// Marks one ready episode without waking the actor task.
     ///
     /// Dispatch uses this for the implicit first poll.
     pub(crate) fn mark_ready(&self) {
-        if !self.ready.swap(true, Ordering::AcqRel)
-            && let Some(entry) = self.entry.get()
-        {
-            entry.ready.push(entry.key);
+        if !self.ready.swap(true, Ordering::AcqRel) {
+            self.queue.push(self.key);
         }
     }
 
@@ -154,9 +150,7 @@ impl ReplyWake {
     /// A reactor may invoke a retained waker after this reply is gone.
     /// Panic containment keeps that wake from unwinding the reactor.
     pub(crate) fn wake_task(&self) {
-        if let Err(payload) = panic::catch_unwind(AssertUnwindSafe(|| self.task.wake())) {
-            Control::discard_panic(payload);
-        }
+        Control::contain_unwind(|| self.task.wake());
     }
 
     pub(crate) fn take_ready(&self) -> bool {
@@ -172,17 +166,16 @@ impl ReplyWake {
     }
 
     fn acquire_lease(&self) {
-        let entry = self
-            .entry
-            .get()
-            .expect("a polled reply owns its queue entry");
-        entry.lease.acquire(entry.key);
+        self.lease.acquire(self.key);
     }
 
     fn release_lease(&self) {
-        if let Some(entry) = self.entry.get() {
-            entry.lease.release(entry.key);
-        }
+        self.lease.release(self.key);
+    }
+
+    #[cfg(test)]
+    pub(crate) fn acquire_lease_for_test(&self) {
+        self.lease.acquire_for_test(self.key);
     }
 }
 
@@ -220,9 +213,9 @@ impl Lease {
 
     /// Clears the slot when it still holds `key`.
     fn release(&self, key: DefaultKey) {
-        let ffi = key.data().as_ffi();
         #[cfg(debug_assertions)]
         {
+            let ffi = key.data().as_ffi();
             match self
                 .holder
                 .compare_exchange(ffi, 0, Ordering::AcqRel, Ordering::Acquire)
@@ -232,7 +225,11 @@ impl Lease {
             }
         }
         #[cfg(not(debug_assertions))]
-        self.holder.store(0, Ordering::Release);
+        {
+            // The key only feeds the debug holder check.
+            let _ = key;
+            self.holder.store(0, Ordering::Release);
+        }
     }
 
     /// Clears the slot after its holder leaves the queue.
@@ -265,8 +262,11 @@ impl<'actor, A: Actor> Cx<'actor, A> {
     /// Creates paired access and liveness proof for one dispatch.
     ///
     /// This operation never borrows the stored actor.
-    pub(crate) fn new(owner: &'actor mut ActorAccess<A>) -> (Self, ScopedWake<'actor, A>) {
-        let reply = ReplyWake::new();
+    pub(crate) fn new(
+        owner: &'actor mut ActorAccess<A>,
+        slot: ReplySlot,
+    ) -> (Self, ScopedWake<'actor, A>) {
+        let reply = ReplyWake::new(slot);
         let scoped_wake = ScopedWake {
             wake: Arc::clone(&reply),
             _lifetime: PhantomData,

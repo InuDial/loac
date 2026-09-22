@@ -1,18 +1,14 @@
-use std::{
-    panic::{self, AssertUnwindSafe},
-    sync::Arc,
-    task::Context,
-};
+use std::{sync::Arc, task::Context};
 
 use crossbeam_queue::SegQueue;
 use slotmap::{DefaultKey, SlotMap};
 
 use crate::{
-    access::Lease,
+    access::{Lease, ReplySlot},
     mailbox::{Control, Mode},
 };
 
-use super::{ScheduledFuture, drop_without_unwind};
+use super::ScheduledFuture;
 
 const ACTIVE_POLL_BUDGET: usize = 16;
 
@@ -64,23 +60,41 @@ impl Queue {
         self.lease.held().is_some()
     }
 
-    /// Inserts one reply and marks its first poll ready.
+    /// Builds one reply inside the slot map and marks its first poll ready.
     ///
-    /// Attachment happens before the first poll.
-    /// No waker can escape before the entry exists.
-    pub(super) fn push(&mut self, future: ScheduledFuture) -> DefaultKey {
-        let key = self.items.insert(future);
-        let item = &self.items[key];
-        item.wake
-            .attach(key, Arc::clone(&self.ready), Arc::clone(&self.lease));
-        item.wake.mark_ready();
-        key
+    /// `insert_with_key` supplies the key before the value exists.
+    /// The builder therefore observes a fully attached wake.
+    pub(super) fn schedule<F>(&mut self, build: F) -> DefaultKey
+    where
+        F: FnOnce(ReplySlot) -> ScheduledFuture,
+    {
+        let ready = Arc::clone(&self.ready);
+        let lease = Arc::clone(&self.lease);
+        self.items.insert_with_key(|key| {
+            let scheduled = build(ReplySlot { key, ready, lease });
+            scheduled.wake.mark_ready();
+            scheduled
+        })
     }
 
     #[cfg(test)]
-    pub(super) fn push_leased(&mut self, future: ScheduledFuture) {
-        let key = self.push(future);
-        self.lease.acquire_for_test(key);
+    pub(super) fn schedule_test<F>(&mut self, future: F) -> DefaultKey
+    where
+        F: std::future::Future<Output = ()> + Send + 'static,
+    {
+        self.schedule(move |slot| ScheduledFuture::test_with(slot, future))
+    }
+
+    #[cfg(test)]
+    pub(super) fn schedule_leased<F>(&mut self, future: F) -> DefaultKey
+    where
+        F: std::future::Future<Output = ()> + Send + 'static,
+    {
+        self.schedule(move |slot| {
+            let scheduled = ScheduledFuture::test_with(slot, future);
+            scheduled.wake.acquire_lease_for_test();
+            scheduled
+        })
     }
 
     pub(super) fn poll(
@@ -178,11 +192,7 @@ impl Queue {
         }
         if !self.ready.is_empty() {
             // A continuation wake must not unwind the actor task.
-            if let Err(payload) =
-                panic::catch_unwind(AssertUnwindSafe(|| task.waker().wake_by_ref()))
-            {
-                Control::discard_panic(payload);
-            }
+            Control::contain_unwind(|| task.waker().wake_by_ref());
             return ReplyPoll::BudgetExhausted;
         }
         if completed {
@@ -215,8 +225,10 @@ impl Queue {
 
 impl Drop for Queue {
     fn drop(&mut self) {
+        // Automatic teardown has no lifecycle handle.
+        // Isolate each value so one Drop panic cannot skip siblings.
         for (_, future) in self.items.drain() {
-            drop_without_unwind(future);
+            Control::contain_unwind(|| drop(future));
         }
         self.lease.force_release();
     }
