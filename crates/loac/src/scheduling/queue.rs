@@ -134,10 +134,6 @@ impl Queue {
             return ReplyPoll::Progress;
         }
         if held {
-            // An in-poll self-schedule must not strand the leased reply.
-            if item.wake.is_ready() {
-                Control::contain_unwind(|| task.waker().wake_by_ref());
-            }
             return ReplyPoll::Leased;
         }
         ReplyPoll::Progress

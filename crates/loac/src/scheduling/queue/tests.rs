@@ -9,7 +9,7 @@ use std::{
 };
 
 use super::*;
-use crate::{Actor, ActorConfig, ActorScope, Shutdown, mailbox::ActorInner, scheduling::ReplyWake};
+use crate::{Actor, ActorConfig, ActorScope, Shutdown, mailbox::ActorInner};
 
 struct TestActor;
 
@@ -330,63 +330,6 @@ fn completing_the_leased_reply_releases_the_slot() {
         ReplyPoll::Progress
     );
     assert!(!queue.is_leased());
-    assert!(queue.is_empty());
-}
-
-struct MarkReadyOnce {
-    polls: Arc<AtomicUsize>,
-    wake: Arc<ReplyWake>,
-}
-
-impl Future for MarkReadyOnce {
-    type Output = ();
-
-    fn poll(self: Pin<&mut Self>, _task: &mut Context<'_>) -> Poll<()> {
-        let poll = self.polls.fetch_add(1, Ordering::SeqCst);
-        if poll == 0 {
-            // In-poll self-schedule without a task wake.
-            self.wake.mark_ready();
-            Poll::Pending
-        } else {
-            Poll::Ready(())
-        }
-    }
-}
-
-#[test]
-fn leased_self_schedule_wakes_the_task() {
-    let actor = test_actor_inner();
-    let mut queue = Queue::new();
-    let polls = Arc::new(AtomicUsize::new(0));
-    queue.schedule(|slot| {
-        let wake = ReplyWake::new(slot);
-        wake.acquire_lease_for_test();
-        let waker = wake.waker();
-        ScheduledFuture {
-            future: Box::pin(MarkReadyOnce {
-                polls: Arc::clone(&polls),
-                wake: Arc::clone(&wake),
-            }),
-            wake,
-            waker,
-        }
-    });
-    let wakes = Arc::new(WakeCounter(AtomicUsize::new(0)));
-    let waker = Waker::from(Arc::clone(&wakes));
-
-    // The leased reply marks itself ready without waking the task.
-    assert_eq!(
-        poll_queue(&mut queue, &actor.control, &waker),
-        ReplyPoll::Leased
-    );
-    assert_eq!(polls.load(Ordering::SeqCst), 1);
-    // The queue must wake the actor so the ready reply is not stranded.
-    assert_eq!(wakes.0.load(Ordering::SeqCst), 1);
-
-    assert_eq!(
-        poll_queue(&mut queue, &actor.control, &waker),
-        ReplyPoll::Progress
-    );
     assert!(queue.is_empty());
 }
 

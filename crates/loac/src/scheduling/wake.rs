@@ -65,8 +65,7 @@ impl ReplyWake {
 
     /// Marks one ready episode without waking the actor task.
     ///
-    /// Dispatch and in-poll self-scheduling use this path.
-    /// The current drain or its budget continuation observes it.
+    /// Dispatch uses this for the implicit first poll.
     pub(crate) fn mark_ready(&self) {
         if !self.ready.swap(true, Ordering::AcqRel) {
             self.queue.push(self.key);
@@ -89,11 +88,6 @@ impl ReplyWake {
 
     pub(crate) fn take_ready(&self) -> bool {
         self.ready.swap(false, Ordering::AcqRel)
-    }
-
-    /// Observes a wake that arrived while the lease held this reply.
-    pub(crate) fn is_ready(&self) -> bool {
-        self.ready.load(Ordering::Acquire)
     }
 
     pub(crate) fn register(&self, waker: &Waker) {

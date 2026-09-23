@@ -134,15 +134,6 @@ impl<'actor, A: Actor> Cx<'actor, A> {
         self.reply.waker()
     }
 
-    /// Schedules this handler future for another poll.
-    ///
-    /// `Cx` runs on the actor task, so the current drain or its budget
-    /// continuation observes the ready key. External wake sources clone
-    /// [`Cx::waker`] instead.
-    pub fn wake(&self) {
-        self.reply.mark_ready();
-    }
-
     /// Pauses scheduled actor work until the returned guard drops.
     ///
     /// Acquisition is immediate during the current handler poll.
