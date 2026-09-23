@@ -215,7 +215,7 @@
 //! This keeps lifecycle choices visible at call sites.
 //! The [examples index] lists runnable guides.
 //!
-//! [examples index]: https://github.com/InuDial/loac/blob/loac-v0.3.0/crates/loac/examples/README.md
+//! [examples index]: https://github.com/InuDial/loac/blob/loac-v0.4.0/crates/loac/examples/README.md
 
 // Derives use this name inside the runtime package.
 // External callers may still rename their dependency.
