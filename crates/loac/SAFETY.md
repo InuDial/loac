@@ -42,7 +42,7 @@ Scheduler teardown keeps actor storage alive during destruction.
 
 ## Directed wakes
 
-Each reply owns one [`ReplyWake`](src/access.rs).
+Each reply owns one [`ReplyWake`](src/scheduling/wake.rs).
 A wake marks that reply ready, pushes its key once, and wakes the actor task.
 The drain polls exactly the pushed keys.
 Stale keys fail the slot map version check.
